@@ -1,0 +1,68 @@
+# ============================================================
+# mini-sync .gitignore
+# ============================================================
+
+# ---------- Maven ----------
+target/
+!.mvn/wrapper/maven-wrapper.jar
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.properties
+
+# ---------- IDE ----------
+.idea/
+*.iml
+.ipr
+.iws
+.vscode/
+.settings/
+.project
+.classpath
+.factorypath
+*.swp
+*.swo
+*~
+
+# ---------- 日志 ----------
+*.log
+logs/
+nohup.out
+
+# ---------- 插件产物 ----------
+# plugins/ 目录下的 jar 由 mvn package 重新生成，
+# 不应提交（体积大，且可由源码一键重建）。
+# 但保留目录本身，让首次 clone 的人知道该把 jar 放哪。
+plugins/*
+!plugins/.gitkeep
+
+# ---------- SQLite 演示数据 ----------
+# PluginSyncBootstrap 会生成这个文件，含演示数据，不入库
+data/
+
+# ---------- 本地敏感配置 ----------
+# 注意：本项目是演示工程，数据库口令写在
+#   sql/init.sql、sql/admin.sql
+# 中便于本地一键复现。
+# 若推到公开仓库，请先评估是否可接受 —— 这是本地测试库口令，不是生产口令。
+*.local.properties
+*.env
+.env.*
+!.env.example
+
+# ---------- 操作系统垃圾 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# ---------- 临时文件 ----------
+*.tmp
+*.temp
+*.bak
+*.orig

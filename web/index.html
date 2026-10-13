@@ -1,0 +1,888 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mini-sync 数据同步平台</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+         background: #f0f2f5; color: #1f2329; font-size: 14px; line-height: 1.6; }
+  code { background: #f0f2f5; padding: 1px 5px; border-radius: 3px;
+         font-family: Consolas, monospace; font-size: 12.5px; }
+
+  /* ---------- 左侧菜单 ---------- */
+  .sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 210px;
+             background: #001529; color: #b8c4d0; overflow-y: auto; }
+  .sidebar .logo { height: 56px; display: flex; align-items: center; padding: 0 20px;
+                   font-size: 16px; font-weight: 600; color: #fff; letter-spacing: .5px; }
+  .menu-group { padding: 12px 20px 6px; font-size: 11px; color: #5b6b7d; letter-spacing: 1px; }
+  .menu-item { padding: 11px 20px; font-size: 13.5px; cursor: pointer;
+               display: flex; align-items: center; gap: 9px; transition: .15s; }
+  .menu-item:hover { background: #0a2540; color: #fff; }
+  .menu-item.active { background: #1677ff; color: #fff; }
+  .menu-item .mi { font-size: 13px; width: 16px; text-align: center; }
+
+  /* ---------- 主区 ---------- */
+  .main { margin-left: 210px; min-height: 100vh; }
+  .topbar { height: 56px; background: #fff; border-bottom: 1px solid #e8ecf1;
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 0 24px; position: sticky; top: 0; z-index: 10; }
+  .topbar .crumb { font-size: 15px; font-weight: 600; color: #1f2329; }
+  .topbar .user { display: flex; align-items: center; gap: 14px; font-size: 13px; color: #5c6470; }
+  .avatar { width: 30px; height: 30px; border-radius: 50%; background: #1677ff; color: #fff;
+            display: flex; align-items: center; justify-content: center; font-size: 13px; }
+  .logout { color: #1677ff; cursor: pointer; font-size: 13px; }
+
+  .content { padding: 20px 24px 40px; }
+  .page { display: none; }
+  .page.active { display: block; }
+
+  .card { background: #fff; border-radius: 8px; margin-bottom: 16px;
+          box-shadow: 0 1px 3px rgba(0,0,0,.05); overflow: hidden; }
+  .card-head { padding: 14px 18px; border-bottom: 1px solid #eef0f3;
+               display: flex; align-items: center; justify-content: space-between; }
+  .card-head h3 { font-size: 15px; font-weight: 600; }
+  .card-body { padding: 16px 18px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #f2f4f7; }
+  th { background: #fafbfc; color: #5c6470; font-weight: 500; font-size: 12px; }
+  td.mono { font-family: Consolas, monospace; }
+
+  .btn { border: none; border-radius: 5px; padding: 7px 15px; font-size: 13px;
+         cursor: pointer; background: #1677ff; color: #fff; transition: .15s; }
+  .btn:hover { background: #0d63e0; }
+  .btn:disabled { background: #b9c2cc; cursor: not-allowed; }
+  .btn.ghost { background: #fff; color: #1677ff; border: 1px solid #a9c6ec; }
+  .btn.ghost:hover { background: #f2f8ff; }
+  .btn.warn { background: #e8890c; }
+  .btn.danger { background: #fff; color: #d9534f; border: 1px solid #f0b9b7; }
+  .btn.danger:hover { background: #fdf2f2; }
+  .btn.sm { padding: 4px 11px; font-size: 12px; }
+  .link { color: #1677ff; cursor: pointer; font-size: 12.5px; margin-right: 10px; }
+  .link.red { color: #d9534f; }
+
+  .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  select, input[type=text], input[type=password], input[type=number] {
+    padding: 7px 11px; border: 1px solid #d5dbe3; border-radius: 5px;
+    font-size: 13px; background: #fff; outline: none; }
+  select:focus, input:focus { border-color: #1677ff; }
+
+  .badge { display: inline-block; padding: 2px 9px; border-radius: 10px; font-size: 12px; }
+  .badge.ok { background: #e7f7f0; color: #17a673; }
+  .badge.pg { background: #e8f0fb; color: #2d6ca3; }
+  .badge.lite { background: #eef6e7; color: #4a7c2f; }
+  .badge.off { background: #fdeaea; color: #d9534f; }
+  .badge.gray { background: #f0f2f5; color: #8a919f; }
+  /* 行数读不到时显示「—」，鼠标悬停看原因 */
+  .cnt-na { color: #b0b6bf; cursor: help; border-bottom: 1px dashed #b0b6bf; }
+
+  /* 数据源行数探测中的提示条（插件类型要起一次 JVM，比较慢） */
+  .loading-bar { display: none; align-items: center; gap: 10px; padding: 10px 16px;
+                 margin-bottom: 12px; background: #fff7e6; border: 1px solid #ffd591;
+                 border-radius: 6px; font-size: 13px; color: #ad6800; }
+  .loading-bar.show { display: flex; }
+  .spinner { width: 13px; height: 13px; border: 2px solid #ffd591;
+             border-top-color: #ad6800; border-radius: 50%;
+             animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* 驱动来源列：mysql-plugin / sqlite-plugin，等宽小字 */
+  .drv-src { font-family: Consolas, monospace; font-size: 12px; color: #5c6470;
+             background: #f6f8fa; border: 1px solid #eef0f3; border-radius: 4px;
+             padding: 1px 7px; display: inline-block; max-width: 140px;
+             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* 执行日志页的「自动滚动」勾选 */
+  .chk { display: flex; align-items: center; gap: 5px; font-size: 12.5px;
+         color: #5c6470; cursor: pointer; user-select: none; }
+  .chk input { margin: 0; cursor: pointer; }
+
+  /* 卡片标题右侧的浅色说明文字 */
+  .hint2 { font-size: 12.5px; color: #99a3ae; }
+
+  /* ---------- 弹窗 ---------- */
+  .mask { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 100;
+          display: none; align-items: center; justify-content: center; }
+  .mask.show { display: flex; }
+  .modal { background: #fff; border-radius: 8px; width: 520px; max-width: 92vw;
+           max-height: 88vh; overflow-y: auto; }
+  .modal-head { padding: 16px 20px; border-bottom: 1px solid #eef0f3;
+                font-weight: 600; display: flex; justify-content: space-between; }
+  .modal-head .x { cursor: pointer; color: #8a919f; }
+  .modal-body { padding: 20px; }
+  .modal-foot { padding: 14px 20px; border-top: 1px solid #eef0f3;
+                display: flex; justify-content: flex-end; gap: 10px; }
+  .form-row { margin-bottom: 15px; }
+  .form-row label { display: block; font-size: 13px; color: #5c6470; margin-bottom: 6px; }
+  .form-row input, .form-row select { width: 100%; }
+  .form-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+
+  .log { background: #1e2733; color: #cdd6e0; border-radius: 6px;
+         padding: 13px 15px; font-family: Consolas, monospace; font-size: 12.5px;
+         height: 200px; overflow-y: auto; white-space: pre-wrap; line-height: 1.75; }
+  .log .ok { color: #4ade80; } .log .err { color: #f87171; }
+  .log .time { color: #64748b; } .log .hl { color: #fbbf24; }
+
+  .hint { font-size: 12.5px; color: #8a919f; margin-top: 8px; }
+  .toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+           background: #1f2329; color: #fff; padding: 10px 20px; border-radius: 6px;
+           font-size: 13px; z-index: 999; display: none; }
+  .toast.show { display: block; }
+</style>
+</head>
+<body>
+
+<!-- 左侧菜单 -->
+<div class="sidebar">
+  <div class="logo">mini-sync</div>
+  <div class="menu-group">数据集成</div>
+  <div class="menu-item active" data-page="datasource" onclick="switchPage(this)">
+    <span class="mi">▣</span> 数据源管理
+  </div>
+  <div class="menu-item" data-page="job" onclick="switchPage(this)">
+    <span class="mi">⇄</span> 同步任务
+  </div>
+  <div class="menu-item" data-page="run" onclick="switchPage(this)">
+    <span class="mi">▶</span> 执行同步
+  </div>
+  <div class="menu-group">运维</div>
+  <div class="menu-item" data-page="logs" onclick="switchPage(this)">
+    <span class="mi">☰</span> 执行历史
+  </div>
+  <div class="menu-item" data-page="console" onclick="switchPage(this)">
+    <span class="mi">▤</span> 运行日志
+  </div>
+</div>
+
+<!-- 主区 -->
+<div class="main">
+  <div class="topbar">
+    <div class="crumb" id="crumb">数据源管理</div>
+    <div class="user">
+      <span id="nickname">-</span>
+      <div class="avatar" id="avatar">舒</div>
+      <span class="logout" onclick="doLogout()">退出</span>
+    </div>
+  </div>
+
+  <div class="content">
+
+    <!-- ============ 数据源管理 ============ -->
+    <div class="page active" id="page-datasource">
+      <div class="loading-bar" id="dsLoading">
+        <span class="spinner"></span>正在探测各数据源行数…（插件类型需启动 Java 引擎，约 17 秒）
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h3>数据源列表</h3>
+          <div class="toolbar">
+            <input type="text" id="dsSearch" placeholder="请输入数据源名称" style="width:190px">
+            <button class="btn" onclick="renderDataSource()">查询</button>
+            <button class="btn ghost" onclick="document.getElementById('dsSearch').value='';renderDataSource()">重置</button>
+            <button class="btn" onclick="openDsModal()">+ 新建数据源</button>
+          </div>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th style="width:60px">ID</th>
+              <th>数据源名称</th>
+              <th style="width:120px">类型</th>
+              <th>连接地址</th>
+              <th>数据库</th>
+              <th style="width:150px">驱动来源</th>
+              <th style="width:100px">记录数</th>
+              <th style="width:80px">状态</th>
+              <th style="width:190px">操作</th>
+            </tr>
+          </thead>
+          <tbody id="dsTable">
+            <tr><td colspan="9" style="text-align:center;color:#8a919f;padding:30px;">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <div class="card-body">
+          <div class="hint">
+            <b>设计说明：</b>所有数据源实现同一个 <code>DataSourceDriver</code> 接口，
+            同步执行器只依赖接口，不感知底层是 MySQL 还是 PostgreSQL。
+            新增一种数据源只需实现一个类并在工厂注册，<b>执行器与前端无需任何改动</b>。
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 同步任务 ============ -->
+    <div class="page" id="page-job">
+      <div class="card">
+        <div class="card-head">
+          <h3>同步任务</h3>
+          <button class="btn" onclick="openJobModal()">+ 新建任务</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th style="width:60px">ID</th>
+              <th>任务名称</th>
+              <th>源数据源</th>
+              <th>目标数据源</th>
+              <th style="width:70px">批次</th>
+              <th style="width:80px">状态</th>
+              <th style="width:150px;white-space:nowrap">操作</th>
+            </tr>
+          </thead>
+          <tbody id="jobTable">
+            <tr><td colspan="7" style="text-align:center;color:#8a919f;padding:30px;">加载中…</td></tr>
+          </tbody>
+        </table>
+        <div class="card-body" style="border-top:1px solid #f2f4f7;">
+          <div class="hint">任务定义了「从哪个数据源同步到哪个数据源」，执行时由 <code>DynamicSyncBootstrap</code>
+            按两端类型自动选择驱动。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 执行同步 ============ -->
+    <!-- 只保留「选任务 + 执行 + 结果摘要」。
+         执行日志已拆到独立的「运行日志」页：两件事的使用节奏不同
+         （执行是动作，日志是观察），挤在一页会让执行页被大块黑框压扁。 -->
+    <div class="page" id="page-run">
+      <div class="card">
+        <div class="card-head">
+          <h3>执行同步</h3>
+          <span class="hint2">执行过程的详细输出见左侧「运行日志」</span>
+        </div>
+        <div class="card-body">
+          <div class="toolbar" style="margin-bottom:14px;">
+            <select id="runJob" style="width:280px"></select>
+            <button class="btn" id="btnRun" onclick="doRun()">开始同步</button>
+          </div>
+          <div id="runResult"></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-body">
+          <div class="hint">
+            同步由 <code>DynamicSyncBootstrap</code> 执行：从管理库读取两端数据源配置，
+            按 <code>ds_type</code> 走工厂选择对应插件驱动，<b>源与目标可任意组合</b>。
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 执行历史 ============ -->
+    <div class="page" id="page-logs">
+      <div class="card">
+        <div class="card-head">
+          <h3>执行历史</h3>
+          <button class="btn ghost sm" onclick="loadHistory()">刷新</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th style="width:60px">ID</th><th>任务名称</th><th style="width:100px">模式</th>
+              <th style="width:110px">同步条数</th><th style="width:110px">耗时</th>
+              <th style="width:80px">结果</th><th style="width:170px">执行时间</th>
+            </tr>
+          </thead>
+          <tbody id="historyTable">
+            <tr><td colspan="7" style="text-align:center;color:#8a919f;padding:30px;">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ============ 运行日志 ============ -->
+    <!-- 同步引擎的实时输出。独立成页，日志再长也不会挤坏执行页。 -->
+    <div class="page" id="page-console">
+      <div class="card">
+        <div class="card-head">
+          <h3>运行日志</h3>
+          <div class="toolbar">
+            <label class="chk"><input type="checkbox" id="logAutoScroll" checked> 自动滚动</label>
+            <button class="btn ghost sm" onclick="document.getElementById('log').innerHTML=''">清空</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="log" id="log"><span class="time">[就绪]</span> 在「执行同步」页选择任务并点击开始，输出会实时显示在这里…</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- 数据源弹窗 -->
+<div class="mask" id="dsMask">
+  <div class="modal">
+    <div class="modal-head">
+      <span id="dsModalTitle">新建数据源</span>
+      <span class="x" onclick="closeModal('dsMask')">✕</span>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="dsId">
+      <div class="form-row">
+        <label>数据源名称 *</label>
+        <input type="text" id="dsName" placeholder="例如：生产库-订单">
+      </div>
+      <div class="form-2">
+        <div class="form-row" id="rowType">
+          <label>数据库类型 *</label>
+          <select id="dsType" onchange="onTypeChange()"></select>
+        </div>
+        <div class="form-row" id="rowPort">
+          <label>端口 *</label>
+          <input type="number" id="dsPort" value="3306">
+        </div>
+      </div>
+      <div class="form-2">
+        <div class="form-row" id="rowHost">
+          <label>主机地址 *</label>
+          <input type="text" id="dsHost" value="127.0.0.1">
+        </div>
+        <div class="form-row">
+          <label id="lblDatabase">数据库名 *</label>
+          <input type="text" id="dsDatabase" placeholder="mini_sync_src">
+        </div>
+      </div>
+      <div class="form-2">
+        <div class="form-row" id="rowUser">
+          <label>用户名 *</label>
+          <input type="text" id="dsUsername" value="root">
+        </div>
+        <div class="form-row" id="rowPwd">
+          <label>密码 *</label>
+          <input type="password" id="dsPassword" value="s123456">
+        </div>
+      </div>
+      <div class="form-row">
+        <label>备注</label>
+        <input type="text" id="dsRemark" placeholder="可选">
+      </div>
+      <div class="hint" id="dsHint"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal('dsMask')">取消</button>
+      <button class="btn" onclick="saveDataSource()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 任务弹窗 -->
+<div class="mask" id="jobMask">
+  <div class="modal">
+    <div class="modal-head">
+      <span id="jobModalTitle">新建同步任务</span>
+      <span class="x" onclick="closeModal('jobMask')">✕</span>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="jobId">
+      <div class="form-row">
+        <label>任务名称 *</label>
+        <input type="text" id="jobName" placeholder="例如：订单库 → 分析库">
+      </div>
+      <div class="form-2">
+        <div class="form-row">
+          <label>源数据源 *</label>
+          <select id="jobSource"></select>
+        </div>
+        <div class="form-row">
+          <label>源表 *</label>
+          <input type="text" id="jobSourceTable" value="t_order">
+        </div>
+      </div>
+      <div class="form-2">
+        <div class="form-row">
+          <label>目标数据源 *</label>
+          <select id="jobTarget"></select>
+        </div>
+        <div class="form-row">
+          <label>目标表 *</label>
+          <input type="text" id="jobTargetTable" value="t_order">
+        </div>
+      </div>
+      <div class="form-row">
+        <label>批次大小</label>
+        <input type="number" id="jobBatch" value="1000">
+      </div>
+      <div class="hint">同步时会按两端数据源的类型自动选择驱动，支持 MySQL 与 PostgreSQL 任意组合。</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal('jobMask')">取消</button>
+      <button class="btn" onclick="saveJob()">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ---------- 登录校验 ----------
+const token = localStorage.getItem('minisync_token');
+if (!token) location.href = '/login.html';
+try {
+  const u = JSON.parse(localStorage.getItem('minisync_user') || '{}');
+  document.getElementById('nickname').textContent = u.nickname || u.username || '';
+  document.getElementById('avatar').textContent = (u.nickname || 'U').slice(0, 1);
+} catch (e) {}
+
+function doLogout() {
+  fetch('/api/logout?token=' + token).finally(() => {
+    localStorage.removeItem('minisync_token');
+    localStorage.removeItem('minisync_user');
+    location.href = '/login.html';
+  });
+}
+
+// ---------- 工具 ----------
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2200);
+}
+function closeModal(id) { document.getElementById(id).classList.remove('show'); }
+function logLine(text, cls) {
+  const el = document.getElementById('log');
+  const now = new Date().toTimeString().slice(0, 8);
+  const s = document.createElement('span');
+  s.innerHTML = '<span class="time">[' + now + ']</span> <span class="' + (cls || '') + '">'
+              + text + '</span>\n';
+  el.appendChild(s);
+  // 默认自动滚动到底部；用户取消勾选后不再抢滚动条（方便翻看上面的记录）
+  const auto = document.getElementById('logAutoScroll');
+  if (!auto || auto.checked) el.scrollTop = el.scrollHeight;
+}
+
+let dsCache = [];
+let jobCache = [];
+
+// ---------- 驱动类型（插件化） ----------
+// DRIVER_META 只提供「默认值」这类与业务无关的便利信息，
+// 类型清单本身来自 /api/drivertype/list，即引擎实时注册表。
+//
+// needsServer: 该类型是否有 host/port 概念（SQLite 是本地文件，没有）
+// needsAuth:   该类型是否需要账号密码（SQLite 单文件，不需要）
+// dbLabel:     「数据库名」这一项实际该填什么（SQLite 是文件路径）
+const DRIVER_META = {
+  MYSQL: {
+    needsServer: true, needsAuth: true, dbLabel: '数据库名',
+    dbPlaceholder: 'mini_sync_src',
+    defaultHost: '127.0.0.1', defaultPort: 3306,
+    defaultUser: 'root', defaultPwd: 's123456', defaultDb: ''
+  },
+  POSTGRESQL: {
+    needsServer: true, needsAuth: true, dbLabel: '数据库名',
+    dbPlaceholder: 'mini_sync_pg',
+    defaultHost: '127.0.0.1', defaultPort: 5432,
+    defaultUser: 'postgres', defaultPwd: 's123456', defaultDb: ''
+  },
+  SQLITE: {
+    needsServer: false, needsAuth: false, dbLabel: '数据库文件路径',
+    dbPlaceholder: 'D:\\mini-sync\\data\\demo.db',
+    defaultHost: '', defaultPort: 0,
+    defaultUser: '', defaultPwd: '',
+    defaultDb: 'D:\\mini-sync\\data\\plugin-demo.db'
+  }
+};
+let driverTypes = [];
+
+async function loadDriverTypes() {
+  let list = [];
+  try {
+    const r = await fetch('/api/drivertype/list').then(x => x.json());
+    list = r.data || [];
+    if (r.fallback) console.warn('驱动类型查询失败，已退回内置列表：', r.msg);
+  } catch (e) {
+    list = [];
+  }
+  // 兜底：接口挂了也要能填出两个内置类型
+  if (!list.length) {
+    list = [{ type: 'MYSQL', display: 'MySQL' }, { type: 'POSTGRESQL', display: 'PostgreSQL' }];
+  }
+  driverTypes = list;
+  renderDriverTypes();
+  return list;
+}
+
+function renderDriverTypes() {
+  const sel = document.getElementById('dsType');
+  if (!sel) return;
+  const prev = sel.value;
+  // 下拉只显示类型名（MySQL / PostgreSQL / SQLite）。
+  // jar 来源信息已搬到「数据源列表」的「驱动来源」列 ——
+  // 那里一屏能看全部数据源的驱动情况，放在新建表单里反而是干扰。
+  sel.innerHTML = driverTypes.map(d =>
+    `<option value="${d.type}" title="驱动来源：${escapeAttr(d.jar || '内置')}">${d.display || d.type}</option>`).join('');
+  if (prev && driverTypes.some(d => d.type === prev)) sel.value = prev;
+}
+
+// ---------- 页面切换 ----------
+const pageTitles = {
+  datasource: '数据源管理', job: '同步任务', run: '执行同步',
+  logs: '执行历史', console: '运行日志'
+};
+function switchPage(el) {
+  document.querySelectorAll('.menu-item').forEach(m => m.classList.remove('active'));
+  el.classList.add('active');
+  const page = el.dataset.page;
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById('page-' + page).classList.add('active');
+  document.getElementById('crumb').textContent = pageTitles[page];
+  if (page === 'datasource') loadDataSources();
+  if (page === 'job') loadJobs();
+  if (page === 'run') loadRunJobs();
+  if (page === 'logs') loadHistory();
+}
+
+// ---------- 数据源 ----------
+async function loadDataSources() {
+  // 插件类型的数据源要起一次 JVM 才能查行数，先给个进度提示，
+  // 否则用户会以为页面卡死
+  const bar = document.getElementById('dsLoading');
+  if (bar) bar.classList.add('show');
+  try {
+    const r = await fetch('/api/datasource/list').then(x => x.json());
+    dsCache = r.data || [];
+    renderDataSource();
+    fillSelects();
+  } finally {
+    if (bar) bar.classList.remove('show');
+  }
+}
+
+function renderDataSource() {
+  const kw = (document.getElementById('dsSearch').value || '').trim().toLowerCase();
+  const list = kw ? dsCache.filter(d => (d.ds_name || '').toLowerCase().includes(kw)) : dsCache;
+
+  document.getElementById('dsTable').innerHTML = list.length ? list.map(d => {
+    // 三种状态必须分开显示，不能一律显示 0：
+    //   rowCount 有值 → 正常；rowCount === null → 探测失败，显示「—」并把原因挂 title 上
+    const cnt = (d.rowCount === null || d.rowCount === undefined)
+      ? `<span class="cnt-na" title="${escapeAttr(d.rowCountError || '无法读取行数')}">—</span>`
+      : d.rowCount.toLocaleString();
+    // 驱动来源：插件 jar 名 → 说明这是插件提供的；否则是内置
+    const drvMeta = driverTypes.find(t => t.type === d.ds_type);
+    const drv = drvMeta
+      ? `<span class="drv-src" title="由插件提供：${escapeAttr(drvMeta.jar || '')}">${shortJar(drvMeta.jar)}</span>`
+      : '<span class="drv-src" title="未查询到驱动类型信息">内置</span>';
+    // SQLite 的 database_name 是文件路径，没有 host/port 概念
+    const isFile = d.ds_type === 'SQLITE';
+    const addr = isFile ? '本地文件' : `${d.host}:${d.port}`;
+    return `
+    <tr>
+      <td>${d.id}</td>
+      <td><b>${d.ds_name}</b>${d.remark ? '<div style="font-size:12px;color:#8a919f;">' + d.remark + '</div>' : ''}</td>
+      <td><span class="badge ${badgeCls(d.ds_type)}">${d.ds_type}</span></td>
+      <td class="mono">${addr}</td>
+      <td class="mono" title="${escapeAttr(d.database_name || '')}">${shorten(d.database_name, 26)}</td>
+      <td>${drv}</td>
+      <td class="mono">${cnt}</td>
+      <td>${d.online ? '<span class="badge ok">在线</span>' : '<span class="badge off">离线</span>'}</td>
+      <td>
+        <span class="link" onclick="testDs(${d.id})">测试</span>
+        <span class="link" onclick="previewDs(${d.id})">预览</span>
+        <span class="link" onclick="openDsModal(${d.id})">修改</span>
+        <span class="link red" onclick="delDs(${d.id})">删除</span>
+      </td>
+    </tr>`;
+  }).join('')
+    : '<tr><td colspan="9" style="text-align:center;color:#8a919f;padding:30px;">暂无数据源，点击右上角新建</td></tr>';
+}
+
+/** 类型徽章配色：MySQL 绿 / PostgreSQL 蓝 / SQLite 橄榄绿 / 其它灰 */
+function badgeCls(type) {
+  if (type === 'POSTGRESQL') return 'pg';
+  if (type === 'SQLITE') return 'lite';
+  if (type === 'MYSQL') return 'ok';
+  return 'gray';
+}
+
+/** minisync-mysql-plugin-1.0.0.jar → mysql-plugin（去掉公共前后缀，省空间） */
+function shortJar(jar) {
+  if (!jar) return '内置';
+  return jar.replace(/^minisync-/, '').replace(/-1\.0\.0\.jar$/, '');
+}
+
+function escapeAttr(s) {
+  return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/"/g,'&quot;')
+    .replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function shorten(s, n) {
+  s = String(s == null ? '' : s);
+  return s.length > n ? '…' + s.slice(s.length - n + 1) : s;
+}
+
+function openDsModal(id) {
+  const d = id ? dsCache.find(x => x.id == id) : null;
+  document.getElementById('dsModalTitle').textContent = d ? '修改数据源' : '新建数据源';
+  document.getElementById('dsId').value = d ? d.id : '';
+  document.getElementById('dsName').value = d ? d.ds_name : '';
+  document.getElementById('dsType').value = d ? d.ds_type : 'MYSQL';
+  document.getElementById('dsDatabase').value = d ? d.database_name : '';
+  document.getElementById('dsRemark').value = d ? (d.remark || '') : '';
+
+  // 先按选中的类型把该显示/隐藏的字段摆好，再填具体值
+  // （顺序不能反：onTypeChange 会重置 host/port/账号/密码/库名）
+  onTypeChange();
+  if (d) {
+    document.getElementById('dsHost').value = d.host || '';
+    document.getElementById('dsPort').value = d.port || 0;
+    document.getElementById('dsUsername').value = d.username || '';
+    document.getElementById('dsPassword').value = d.password || '';
+  }
+  document.getElementById('dsMask').classList.add('show');
+}
+
+/**
+ * 切换数据源类型时，同步表单形态。
+ *
+ * 为什么不能一视同仁地显示 host/port/账号/密码：
+ * SQLite 是本地文件，既没有端口也不需要账号密码，硬显示只会让人乱填。
+ * 「数据库名」这一项的含义也随类型变化 —— MySQL/PG 是库名，SQLite 是文件路径，
+ * 所以连 label 和 placeholder 都要跟着换。
+ */
+function onTypeChange() {
+  const type = document.getElementById('dsType').value;
+  const meta = DRIVER_META[type] || {};
+
+  // 有服务端概念才显示 host/port
+  toggleFieldRow('rowHost', !!meta.needsServer);
+  toggleFieldRow('rowPort', !!meta.needsServer);
+  // 有账号体系才显示用户名/密码
+  toggleFieldRow('rowUser', !!meta.needsAuth);
+  toggleFieldRow('rowPwd', !!meta.needsAuth);
+
+  // 「数据库名」的 label / placeholder 随类型变化
+  document.getElementById('lblDatabase').textContent = (meta.dbLabel || '数据库名') + ' *';
+  document.getElementById('dsDatabase').placeholder = meta.dbPlaceholder || '';
+
+  document.getElementById('dsHost').value = meta.defaultHost || '127.0.0.1';
+  document.getElementById('dsPort').value = meta.defaultPort || 3306;
+  document.getElementById('dsUsername').value = meta.defaultUser || 'root';
+  document.getElementById('dsPassword').value = meta.defaultPwd || '';
+  document.getElementById('dsDatabase').value = meta.defaultDb || '';
+
+  // 按类型给一句提示，说明这一项到底该填什么
+  const hints = {
+    SQLITE: 'SQLite 是单文件数据库，「数据库文件路径」填 .db 文件的绝对路径（可含中文/空格）；无需端口与账号密码。',
+    MYSQL: '「数据库名」填逻辑库名，如 mini_sync_src。',
+    POSTGRESQL: '「数据库名」填逻辑库名，如 mini_sync_pg。'
+  };
+  document.getElementById('dsHint').textContent = hints[type] || '';
+}
+
+/** 显示/隐藏 form-2 网格里的某一格（用 id 包一层 grid cell） */
+function toggleFieldRow(id, show) {
+  const el = document.getElementById(id);
+  if (el) el.style.display = show ? '' : 'none';
+}
+
+async function saveDataSource() {
+  const type = document.getElementById('dsType').value;
+  const meta = DRIVER_META[type] || {};
+  const isFileType = meta.needsServer === false;
+
+  const body = {
+    id: document.getElementById('dsId').value || null,
+    ds_name: document.getElementById('dsName').value.trim(),
+    ds_type: type,
+    // 文件型数据源（SQLite）没有 host/port/账号密码，传空串让后端忽略
+    host: isFileType ? '' : document.getElementById('dsHost').value.trim(),
+    port: isFileType ? 0 : parseInt(document.getElementById('dsPort').value || '0'),
+    database_name: document.getElementById('dsDatabase').value.trim(),
+    username: isFileType ? '' : document.getElementById('dsUsername').value.trim(),
+    password: isFileType ? '' : document.getElementById('dsPassword').value,
+    remark: document.getElementById('dsRemark').value.trim()
+  };
+  if (!body.ds_name || !body.database_name) return toast('请填写名称和数据库名');
+  if (!isFileType && !body.host) return toast('请填写主机地址');
+  if (!isFileType && body.port <= 0) return toast('端口不合法');
+
+  const r = await fetch('/api/datasource/save', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }).then(x => x.json());
+
+  toast(r.msg || '已保存');
+  if (r.code === 200) { closeModal('dsMask'); loadDataSources(); }
+}
+
+async function delDs(id) {
+  if (!confirm('确认删除该数据源？')) return;
+  await fetch('/api/datasource/delete?id=' + id);
+  toast('已删除'); loadDataSources();
+}
+
+async function testDs(id) {
+  toast('测试中…');
+  const r = await fetch('/api/datasource/test?id=' + id).then(x => x.json());
+  toast(r.msg);
+}
+
+async function previewDs(id) {
+  const r = await fetch('/api/preview?id=' + id).then(x => x.json());
+  if (!r.data || !r.data.length) {
+    return toast(r.msg || '该数据源没有数据（或表不存在）');
+  }
+  const txt = r.data.map(x =>
+    `${x.id} | ${x.order_no} | ${x.user_id} | ${x.amount} | ${x.status}`).join('\n');
+  alert('前 ' + r.data.length + ' 行数据：\n\n' + txt);
+}
+
+// ---------- 任务 ----------
+async function loadJobs() {
+  const r = await fetch('/api/job/list').then(x => x.json());
+  jobCache = r.data || [];
+  document.getElementById('jobTable').innerHTML = jobCache.length ? jobCache.map(j => {
+    // 关键：三个操作按钮放在同一行，且用 nowrap + 固定列宽，
+    // 否则「删除」会像之前那样被挤到第二行
+    return `
+    <tr>
+      <td>${j.id}</td>
+      <td><b>${j.job_name}</b></td>
+      <td><span class="badge ${badgeCls(j.sourceType)}">${j.sourceType || '-'}</span>
+          ${j.sourceName || '-'}</td>
+      <td><span class="badge ${badgeCls(j.targetType)}">${j.targetType || '-'}</span>
+          ${j.targetName || '-'}</td>
+      <td class="mono">${j.batch_size}</td>
+      <td><span class="badge ok">启用</span></td>
+      <td style="white-space:nowrap">
+        <span class="link" onclick="goRun(${j.id})">执行</span>
+        <span class="link" onclick="openJobModal(${j.id})">修改</span>
+        <span class="link red" onclick="delJob(${j.id})">删除</span>
+      </td>
+    </tr>`;
+  }).join('')
+    : '<tr><td colspan="7" style="text-align:center;color:#8a919f;padding:30px;">暂无任务</td></tr>';
+  fillSelects();
+}
+
+function fillSelects() {
+  const opts = dsCache.map(d => `<option value="${d.id}">${d.ds_name}（${d.ds_type}·${d.database_name}）</option>`).join('');
+  document.getElementById('jobSource').innerHTML = opts;
+  document.getElementById('jobTarget').innerHTML = opts;
+}
+
+function openJobModal(id) {
+  if (!dsCache.length) return toast('请先创建数据源');
+  const j = id ? jobCache.find(x => x.id == id) : null;
+  document.getElementById('jobModalTitle').textContent = j ? '修改同步任务' : '新建同步任务';
+  document.getElementById('jobId').value = j ? j.id : '';
+  document.getElementById('jobName').value = j ? j.job_name : '';
+  document.getElementById('jobSource').value = j ? j.source_datasource_id : dsCache[0].id;
+  document.getElementById('jobTarget').value = j ? j.target_datasource_id : dsCache[Math.min(1, dsCache.length - 1)].id;
+  document.getElementById('jobSourceTable').value = j ? j.source_table : 't_order';
+  document.getElementById('jobTargetTable').value = j ? j.target_table : 't_order';
+  document.getElementById('jobBatch').value = j ? j.batch_size : 1000;
+  document.getElementById('jobMask').classList.add('show');
+}
+
+async function saveJob() {
+  const body = {
+    id: document.getElementById('jobId').value || null,
+    job_name: document.getElementById('jobName').value.trim(),
+    source_datasource_id: document.getElementById('jobSource').value,
+    source_table: document.getElementById('jobSourceTable').value.trim(),
+    target_datasource_id: document.getElementById('jobTarget').value,
+    target_table: document.getElementById('jobTargetTable').value.trim(),
+    batch_size: document.getElementById('jobBatch').value
+  };
+  if (!body.job_name) return toast('请填写任务名称');
+  if (body.source_datasource_id === body.target_datasource_id) {
+    return toast('源和目标不能是同一个数据源');
+  }
+
+  const r = await fetch('/api/job/save', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }).then(x => x.json());
+
+  toast(r.msg || '已保存');
+  if (r.code === 200) { closeModal('jobMask'); loadJobs(); }
+}
+
+async function delJob(id) {
+  if (!confirm('确认删除该任务？')) return;
+  await fetch('/api/job/delete?id=' + id);
+  toast('已删除'); loadJobs();
+}
+
+// ---------- 执行 ----------
+async function loadRunJobs() {
+  await loadJobs();
+  const sel = document.getElementById('runJob');
+  sel.innerHTML = jobCache.map(j =>
+    `<option value="${j.id}">${j.job_name}（${j.sourceType} → ${j.targetType}）</option>`).join('');
+}
+
+function goRun(id) {
+  document.querySelectorAll('.menu-item').forEach(m => {
+    if (m.dataset.page === 'run') m.classList.add('active'); else m.classList.remove('active');
+  });
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById('page-run').classList.add('active');
+  document.getElementById('crumb').textContent = '执行同步';
+  loadRunJobs().then(() => { document.getElementById('runJob').value = id; });
+}
+
+async function doRun() {
+  const jobId = document.getElementById('runJob').value;
+  if (!jobId) return toast('请先创建任务');
+  const btn = document.getElementById('btnRun');
+  btn.disabled = true; btn.textContent = '执行中…';
+
+  logLine('开始执行任务 ID=' + jobId, 'hl');
+  try {
+    const d = (await fetch('/api/run?jobId=' + jobId + '&mode=cursor').then(x => x.json())).data;
+    (d.raw || []).forEach(l => logLine(l.replace(/^\S+\s+\S+\s+\S+\s+\S+\s+-\s+/, '')));
+    logLine('同步条数：' + d.totalCount + ' 条', 'ok');
+    logLine('总耗时：' + d.costMs + ' ms', 'ok');
+    document.getElementById('runResult').innerHTML =
+      `<div style="padding:12px 16px;background:#e7f7f0;border-radius:6px;color:#17a673;">
+        同步成功：${d.totalCount.toLocaleString()} 条，耗时 ${d.costMs} ms
+       </div>`;
+  } catch (e) {
+    logLine('执行失败：' + e.message, 'err');
+  }
+  btn.disabled = false; btn.textContent = '开始同步';
+  loadDataSources();
+  loadJobs();
+}
+
+// ---------- 历史 ----------
+async function loadHistory() {
+  const r = await fetch('/api/logs').then(x => x.json());
+  const list = r.data || [];
+  document.getElementById('historyTable').innerHTML = list.length ? list.map(l => `
+    <tr>
+      <td>${l.id}</td>
+      <td>${l.job_name || '-'}</td>
+      <td><span class="badge gray">${l.sync_mode || '-'}</span></td>
+      <td class="mono">${(parseInt(l.total_count) || 0).toLocaleString()}</td>
+      <td class="mono">${l.cost_ms} ms</td>
+      <td>${parseInt(l.success) ? '<span class="badge ok">成功</span>' : '<span class="badge off">失败</span>'}</td>
+      <td class="mono" style="font-size:12px">${l.create_time || ''}</td>
+    </tr>`).join('')
+    : '<tr><td colspan="7" style="text-align:center;color:#8a919f;padding:30px;">暂无执行记录</td></tr>';
+}
+
+// ---------- 初始化 ----------
+// 不再定时自动刷新：行数探测对插件类型要起一次 JVM（约 17 秒），
+// 30 秒轮询一次会一直卡在加载态。改为手动点「查询」按钮刷新。
+//
+// loadDriverTypes 必须先于 loadDataSources 完成：表格里的「驱动来源」列
+// 要查 driverTypes 才能显示 jar 名。用 await 串起来保证顺序。
+(async function init() {
+  try {
+    await loadDriverTypes();
+  } catch (e) {
+    console.warn('驱动类型加载失败，表格的「驱动来源」列将显示「内置」', e);
+  }
+  loadDataSources();
+  loadJobs();
+})();
+</script>
+</body>
+</html>

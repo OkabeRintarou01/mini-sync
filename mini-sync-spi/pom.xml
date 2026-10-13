@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+         http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.minisync</groupId>
+        <artifactId>mini-sync</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>mini-sync-spi</artifactId>
+    <name>mini-sync-spi</name>
+    <description>
+        插件契约模块：只含接口，不含任何实现。
+        第三方驱动开发时只依赖这一个 jar，不需要依赖主工程。
+    </description>
+
+    <!--
+      刻意不声明任何依赖（连 slf4j / lombok 都不要）。
+      原因：这个 jar 会被打进每个插件包里，依赖越少，插件 classloader 层级越干净，
+      也越不容易出现"同一个类被两个 classloader 加载成不同 Class"的 LinkageError。
+    -->
+    <dependencies>
+    </dependencies>
+
+</project>

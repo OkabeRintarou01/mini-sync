@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+         http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.minisync</groupId>
+        <artifactId>mini-sync</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>mini-sync-plugin-loader</artifactId>
+    <name>mini-sync-plugin-loader</name>
+    <description>
+        插件加载器：扫描 plugins 目录下的驱动 jar，
+        用独立 ClassLoader 加载并通过 SPI 注册，实现不重启主工程的驱动扩展。
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.minisync</groupId>
+            <artifactId>mini-sync-spi</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

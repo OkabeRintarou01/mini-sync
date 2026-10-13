@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mini-sync 数据同步平台 · 登录</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, #eef3f9 0%, #dce8f5 50%, #e8f0f8 100%);
+    position: relative; overflow: hidden;
+  }
+  /* 背景装饰光点，模仿极简科技风 */
+  .orb { position: absolute; border-radius: 50%; opacity: .5; }
+  .orb.o1 { width: 90px; height: 90px; top: 12%; left: 9%;
+            background: radial-gradient(circle at 35% 35%, #cfe0f2, #a9c8e8); }
+  .orb.o2 { width: 46px; height: 46px; top: 24%; left: 17%;
+            background: radial-gradient(circle at 35% 35%, #f6d9dd, #e9b8c0); }
+  .orb.o3 { width: 70px; height: 70px; bottom: 16%; right: 10%;
+            background: radial-gradient(circle at 35% 35%, #d5e4f3, #b0cce6); }
+  .orb.o4 { width: 34px; height: 34px; bottom: 28%; right: 22%;
+            background: radial-gradient(circle at 35% 35%, #f3d6da, #e5b4bd); }
+  .line { position: absolute; background: #c8d8e8; height: 1px; opacity: .55; }
+
+  .login-card {
+    position: relative; z-index: 2; width: 420px; padding: 46px 44px 40px;
+    background: rgba(255,255,255,.92); border-radius: 12px;
+    box-shadow: 0 10px 40px rgba(31,78,121,.10), 0 2px 8px rgba(31,78,121,.06);
+    backdrop-filter: blur(6px);
+  }
+  .brand { text-align: center; margin-bottom: 30px; }
+  .brand h1 { font-size: 30px; font-weight: 700; color: #1f2329; letter-spacing: .5px; }
+  .brand p { font-size: 13px; color: #8a919f; margin-top: 8px; letter-spacing: 2px; }
+
+  .tabs { display: flex; justify-content: center; gap: 26px; margin-bottom: 26px; }
+  .tab { font-size: 14px; color: #8a919f; padding-bottom: 8px; cursor: default; }
+  .tab.active { color: #1677ff; border-bottom: 2px solid #1677ff; font-weight: 500; }
+
+  .field { margin-bottom: 16px; position: relative; }
+  .field input {
+    width: 100%; padding: 11px 38px 11px 38px; font-size: 14px;
+    border: 1px solid #d9e0e8; border-radius: 6px; background: #fafbfc;
+    outline: none; transition: .18s;
+  }
+  .field input:focus { border-color: #1677ff; background: #fff;
+                       box-shadow: 0 0 0 3px rgba(22,119,255,.08); }
+  .field .ico { position: absolute; left: 13px; top: 50%; transform: translateY(-50%);
+                color: #9aa5b1; font-size: 14px; }
+  .field .eye { position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+                color: #9aa5b1; font-size: 14px; cursor: pointer; user-select: none; }
+
+  .btn-login {
+    width: 100%; padding: 12px; margin-top: 10px;
+    background: #1677ff; color: #fff; border: none; border-radius: 6px;
+    font-size: 15px; font-weight: 500; cursor: pointer; transition: .18s;
+  }
+  .btn-login:hover { background: #0d63e0; }
+  .btn-login:disabled { background: #a9c6ec; cursor: not-allowed; }
+
+  .tips { margin-top: 18px; text-align: center; font-size: 12.5px; color: #99a3ae; }
+  .tips b { color: #5c6470; }
+  .err { margin-top: 14px; padding: 9px 12px; border-radius: 6px; font-size: 13px;
+         background: #fdeaea; color: #d9534f; text-align: center; display: none; }
+</style>
+</head>
+<body>
+
+<div class="orb o1"></div><div class="orb o2"></div>
+<div class="orb o3"></div><div class="orb o4"></div>
+
+<div class="login-card">
+  <div class="brand">
+    <h1>mini-sync</h1>
+    <p>数据同步平台</p>
+  </div>
+
+  <div class="tabs">
+    <div class="tab active">Credentials</div>
+  </div>
+
+  <div class="field">
+    <span class="ico">👤</span>
+    <input id="username" type="text" placeholder="Account: admin" value="admin" autocomplete="username">
+  </div>
+
+  <div class="field">
+    <span class="ico">🔒</span>
+    <input id="password" type="password" placeholder="password" autocomplete="current-password">
+    <span class="eye" onclick="togglePwd()">👁</span>
+  </div>
+
+  <button class="btn-login" id="btnLogin" onclick="doLogin()">Login</button>
+
+  <div class="err" id="err"></div>
+
+  <div class="tips">默认账号 <b>admin</b> / 密码 <b>admin123</b></div>
+</div>
+
+<script>
+function togglePwd() {
+  const el = document.getElementById('password');
+  el.type = el.type === 'password' ? 'text' : 'password';
+}
+
+async function doLogin() {
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+  const err = document.getElementById('err');
+  const btn = document.getElementById('btnLogin');
+
+  err.style.display = 'none';
+  if (!username || !password) {
+    err.textContent = '请输入账号和密码';
+    err.style.display = 'block';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = '登录中…';
+  try {
+    const resp = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    });
+    const r = await resp.json();
+    console.log('[login] HTTP', resp.status, JSON.stringify(r));
+
+    if (r.code === 200 && r.data && r.data.token) {
+      localStorage.setItem('minisync_token', r.data.token);
+      localStorage.setItem('minisync_user', JSON.stringify(r.data.user));
+      location.href = '/index.html';
+    } else {
+      err.textContent = r.msg || ('登录失败（code=' + r.code + '）');
+      err.style.display = 'block';
+    }
+  } catch (e) {
+    console.error('[login] 网络错误', e);
+    err.textContent = '网络错误：' + e.message;
+    err.style.display = 'block';
+  }
+  btn.disabled = false;
+  btn.textContent = 'Login';
+}
+
+// 回车登录。注意：按钮获得焦点时回车会同时触发 click 与 keydown，
+// 用 e.target 判断避免重复提交。
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Enter') return;
+  const tag = (e.target && e.target.tagName) || '';
+  if (tag === 'BUTTON') return;   // 按钮自己会触发 click
+  doLogin();
+});
+</script>
+</body>
+</html>
