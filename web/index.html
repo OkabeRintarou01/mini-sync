@@ -354,7 +354,8 @@
         </div>
         <div class="form-row" id="rowPwd">
           <label>密码 *</label>
-          <input type="password" id="dsPassword" value="s123456">
+          <!-- 不预填密码：改数据源时空着表示"不修改"，且避免密码明文出现在截图上 -->
+          <input type="password" id="dsPassword" value="" placeholder="留空则使用 .env 默认数据源密码">
         </div>
       </div>
       <div class="form-row">
@@ -470,19 +471,19 @@ const DRIVER_META = {
     needsServer: true, needsAuth: true, dbLabel: '数据库名',
     dbPlaceholder: 'mini_sync_src',
     defaultHost: '127.0.0.1', defaultPort: 3306,
-    defaultUser: 'root', defaultPwd: 's123456', defaultDb: ''
+    defaultUser: 'root', defaultDb: ''
   },
   POSTGRESQL: {
     needsServer: true, needsAuth: true, dbLabel: '数据库名',
     dbPlaceholder: 'mini_sync_pg',
     defaultHost: '127.0.0.1', defaultPort: 5432,
-    defaultUser: 'postgres', defaultPwd: 's123456', defaultDb: ''
+    defaultUser: 'postgres', defaultDb: ''
   },
   SQLITE: {
     needsServer: false, needsAuth: false, dbLabel: '数据库文件路径',
     dbPlaceholder: 'D:\\mini-sync\\data\\demo.db',
     defaultHost: '', defaultPort: 0,
-    defaultUser: '', defaultPwd: '',
+    defaultUser: '',
     defaultDb: 'D:\\mini-sync\\data\\plugin-demo.db'
   }
 };
@@ -630,7 +631,9 @@ function openDsModal(id) {
     document.getElementById('dsHost').value = d.host || '';
     document.getElementById('dsPort').value = d.port || 0;
     document.getElementById('dsUsername').value = d.username || '';
-    document.getElementById('dsPassword').value = d.password || '';
+    // 密码不回填。留空表示"不修改"，保存时后端沿用原值。
+    // 两个好处：① 密码不明文出现在表单和截图上 ② 不会误改掉密码
+    document.getElementById('dsPassword').value = '';
   }
   document.getElementById('dsMask').classList.add('show');
 }
@@ -660,8 +663,12 @@ function onTypeChange() {
 
   document.getElementById('dsHost').value = meta.defaultHost || '127.0.0.1';
   document.getElementById('dsPort').value = meta.defaultPort || 3306;
-  document.getElementById('dsUsername').value = meta.defaultUser || 'root';
-  document.getElementById('dsPassword').value = meta.defaultPwd || '';
+  document.getElementById('dsUsername').value = meta.defaultUser || '';
+  // 密码永远不从前端缓存或数据库回填。空值表示新建时需填写、编辑时沿用原值。
+  document.getElementById('dsPassword').value = '';
+  document.getElementById('dsPassword').placeholder = document.getElementById('dsId').value
+    ? '留空表示不修改现有密码'
+    : '留空则使用 .env 默认数据源密码';
   document.getElementById('dsDatabase').value = meta.defaultDb || '';
 
   // 按类型给一句提示，说明这一项到底该填什么
@@ -699,6 +706,8 @@ async function saveDataSource() {
   if (!body.ds_name || !body.database_name) return toast('请填写名称和数据库名');
   if (!isFileType && !body.host) return toast('请填写主机地址');
   if (!isFileType && body.port <= 0) return toast('端口不合法');
+  // 密码输入可以留空：后端会读取本地 .env 的 MINISYNC_DEFAULT_DS_PWD。
+  // 若两者都没配置，后端返回明确错误提示。
 
   const r = await fetch('/api/datasource/save', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },

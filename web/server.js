@@ -17,16 +17,58 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 
-const PORT = 8090;
+// 零依赖读取项目根目录 .env：系统环境变量优先，.env 补充未设置项。
+// Java 子进程继承 process.env，因此 Node 控制台触发的 Java 同步也能读取同一配置。
+function loadEnvFile(filePath) {
+    if (!fs.existsSync(filePath)) return;
+    const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/);
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const m = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+        if (!m || process.env[m[1]] !== undefined) continue;
+        let value = m[2].trim();
+        if ((value.startsWith('"') && value.endsWith('"')) ||
+            (value.startsWith("'") && value.endsWith("'"))) {
+            value = value.slice(1, -1);
+        }
+        process.env[m[1]] = value;
+    }
+}
+loadEnvFile(path.resolve(__dirname, '..', '.env'));
+
+const PORT = process.env.MINISYNC_PORT ? parseInt(process.env.MINISYNC_PORT) : 8090;
 const ROOT = __dirname;
 
-const MYSQL = 'C:\\Program Files\\MySQL\\MySQL Server 5.7\\bin\\mysql.exe';
-const DB_USER = 'root';
-const DB_PWD = 's123456';
-const ADMIN_DB = 'mini_sync_admin';
-const MVN = 'D:\\apache-maven-3.9.16\\bin\\mvn.cmd';
-const JAVA_HOME = 'D:\\jdk';
-const PROJECT = path.resolve(__dirname, '..');
+// ------------------------------------------------------------------
+// 配置外置
+//
+// 所有环境相关、含敏感信息的配置都从【环境变量】读取，代码里不留硬编码口令。
+// 这样做的意义不是"把密码藏起来"（本地测试口令谈不上藏），而是：
+//   1. 同一份代码可以跑在不同环境，不需要改代码
+//   2. 提交到版本库时不带敏感信息
+//   3. 生产上可以接密钥管理系统，只改部署配置
+//
+// 每个变量都提供开发期默认值，保证 clone 下来 `node server.js` 直接能跑。
+// ------------------------------------------------------------------
+const MYSQL = process.env.MINISYNC_MYSQL_BIN
+    || 'C:\\Program Files\\MySQL\\MySQL Server 5.7\\bin\\mysql.exe';
+const DB_USER = process.env.MINISYNC_DB_USER || 'root';
+const DB_PWD  = process.env.MINISYNC_DB_PWD || '';
+const ADMIN_DB = process.env.MINISYNC_ADMIN_DB || 'mini_sync_admin';
+const DEFAULT_DS_PASSWORD = process.env.MINISYNC_DEFAULT_DS_PWD || '';
+if (!DB_PWD) {
+    console.error('[config] 缺少 MINISYNC_DB_PWD。请复制项目根目录 .env.example 为 .env，填写密码后重新启动。');
+    process.exit(1);
+}
+
+// Maven / JDK 路径按本机实际安装位置配置，也可用环境变量覆盖
+const MVN       = process.env.MINISYNC_MVN      || 'D:\\apache-maven-3.9.16\\bin\\mvn.cmd';
+const JAVA_HOME = process.env.MINISYNC_JAVA_HOME || 'D:\\jdk';
+const PROJECT   = path.resolve(__dirname, '..');
+
+// 只报告凭据已配置，不打印口令内容。
+console.log('[config] MINISYNC_DB_PWD 已从环境变量/.env 加载');
 
 // 驱动类型查询用的入口类（打印全部已注册插件后退出）
 const DRIVER_TYPES_CLASS = 'com.minisync.job.DriverTypeLister';
@@ -422,6 +464,8 @@ const server = http.createServer(async (req, res) => {
                     console.warn('[datasource] 探测失败 id=' + d.id
                         + ' name=' + d.ds_name + ' : ' + d.rowCountError);
                 }
+                // 绝不把数据源密码回传给浏览器；编辑时密码留空表示沿用数据库原值。
+                delete d.password;
             }
             return json(res, { code: 200, data: rows });
         }
@@ -431,21 +475,37 @@ const server = http.createServer(async (req, res) => {
             if (!b.ds_name || !b.database_name) {
                 return json(res, { code: 400, msg: '名称与数据库名不能为空' });
             }
+            const type = String(b.ds_type || 'MYSQL').toUpperCase();
+            const isSqlite = type === 'SQLITE';
+            const host = isSqlite ? '' : (b.host || '127.0.0.1');
+            const port = isSqlite ? 0 : (parseInt(b.port) || (type === 'POSTGRESQL' ? 5432 : 3306));
+            const username = isSqlite ? '' : (b.username || '');
+            const password = isSqlite ? '' : (b.password || DEFAULT_DS_PASSWORD);
+            if (b.id == null && !isSqlite && !password) {
+                return json(res, { code: 400, msg: '请填写数据库密码，或在 .env 配置 MINISYNC_DEFAULT_DS_PWD' });
+            }
+
             if (b.id) {
+                const id = parseInt(b.id);
+                const currentRows = await query(
+                    'SELECT password FROM datasource_config WHERE id=' + id, ADMIN_DB);
+                if (!currentRows.length) return json(res, { code: 404, msg: '数据源不存在' });
+                // 编辑时密码输入框留空表示沿用现有口令；后端不把密码发回前端。
+                const nextPassword = isSqlite ? '' : (b.password ? b.password : currentRows[0].password);
                 await query(`UPDATE datasource_config SET
-                    ds_name=${sqlEscape(b.ds_name)}, ds_type=${sqlEscape(b.ds_type || 'MYSQL')},
-                    host=${sqlEscape(b.host || '127.0.0.1')}, port=${parseInt(b.port) || 3306},
-                    database_name=${sqlEscape(b.database_name)}, username=${sqlEscape(b.username)},
-                    password=${sqlEscape(b.password)}, remark=${sqlEscape(b.remark)}
-                    WHERE id=${parseInt(b.id)}`, ADMIN_DB);
+                    ds_name=${sqlEscape(b.ds_name)}, ds_type=${sqlEscape(type)},
+                    host=${sqlEscape(host)}, port=${port},
+                    database_name=${sqlEscape(b.database_name)}, username=${sqlEscape(username)},
+                    password=${sqlEscape(nextPassword)}, remark=${sqlEscape(b.remark)}
+                    WHERE id=${id}`, ADMIN_DB);
                 return json(res, { code: 200, msg: '修改成功' });
             }
             await query(`INSERT INTO datasource_config
                 (ds_name, ds_type, host, port, database_name, username, password, remark)
-                VALUES (${sqlEscape(b.ds_name)}, ${sqlEscape(b.ds_type || 'MYSQL')},
-                        ${sqlEscape(b.host || '127.0.0.1')}, ${parseInt(b.port) || 3306},
-                        ${sqlEscape(b.database_name)}, ${sqlEscape(b.username)},
-                        ${sqlEscape(b.password)}, ${sqlEscape(b.remark)})`, ADMIN_DB);
+                VALUES (${sqlEscape(b.ds_name)}, ${sqlEscape(type)},
+                        ${sqlEscape(host)}, ${port},
+                        ${sqlEscape(b.database_name)}, ${sqlEscape(username)},
+                        ${sqlEscape(password)}, ${sqlEscape(b.remark)})`, ADMIN_DB);
             return json(res, { code: 200, msg: '新增成功' });
         }
 

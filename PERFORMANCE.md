@@ -184,11 +184,15 @@ node server.js
 ## 十、复现命令
 
 ```powershell
-# 1. MySQL 建库造数据（首次）
-Get-Content D:\mini-sync\sql\init.sql -Raw | & "C:\Program Files\MySQL\MySQL Server 5.7\bin\mysql.exe" -uroot -ps123456
+# 0. 先复制 .env.example 为 .env，并填写 MINISYNC_DB_PWD / MINISYNC_PG_PWD
+Copy-Item D:\mini-sync\.env.example D:\mini-sync\.env
+notepad D:\mini-sync\.env
 
-# 2. 启动 PostgreSQL 容器（首次）
-docker run -d --name mini-sync-pg -e POSTGRES_PASSWORD=s123456 -p 5432:5432 docker.1panel.live/library/postgres:16
+# 1. MySQL 建库造数据（首次；-p 会交互提示密码）
+Get-Content D:\mini-sync\sql\init.sql -Raw | & $env:MINISYNC_MYSQL_BIN -u$env:MINISYNC_DB_USER -p
+
+# 2. 启动 PostgreSQL 容器（首次；请在本地终端交互填写密码，勿把真实密码写入命令历史）
+docker run -d --name mini-sync-pg -e POSTGRES_PASSWORD="$env:MINISYNC_PG_PWD" -p 5432:5432 postgres:16
 
 # 3. PG 建表造数据（首次）
 Get-Content D:\mini-sync\sql\pg_init.sql -Raw | docker exec -i mini-sync-pg psql -U postgres -d mini_sync_pg

@@ -71,11 +71,11 @@ public class PluginSyncBootstrap {
 
         // ---------- 2. 源：MySQL，走插件 ----------
         DataSourceConfig mysqlCfg = new DataSourceConfig();
-        mysqlCfg.setHost("127.0.0.1");
-        mysqlCfg.setPort(3306);
-        mysqlCfg.setDatabaseName("mini_sync_src");
-        mysqlCfg.setUsername("root");
-        mysqlCfg.setPassword("s123456");
+        mysqlCfg.setHost(env("MINISYNC_DB_HOST", "127.0.0.1"));
+        mysqlCfg.setPort(Integer.parseInt(env("MINISYNC_DB_PORT", "3306")));
+        mysqlCfg.setDatabaseName(env("MINISYNC_SRC_DB", "mini_sync_src"));
+        mysqlCfg.setUsername(env("MINISYNC_DB_USER", "root"));
+        mysqlCfg.setPassword(requiredEnv("MINISYNC_DB_PWD"));
 
         // ---------- 3. 目标：SQLite，同样走插件 ----------
         DataSourceConfig sqliteCfg = new DataSourceConfig();
@@ -118,5 +118,20 @@ public class PluginSyncBootstrap {
 
         pool.closeAll();
         System.exit(actual == result.getTotalCount() ? 0 : 1);
+    }
+
+    /** 取非敏感环境变量，为空时用默认值。 */
+    private static String env(String key, String fallback) {
+        String v = System.getenv(key);
+        return (v == null || v.trim().isEmpty()) ? fallback : v.trim();
+    }
+
+    /** 敏感变量必须显式配置，源码不提供口令默认值。 */
+    private static String requiredEnv(String key) {
+        String v = System.getenv(key);
+        if (v == null || v.trim().isEmpty()) {
+            throw new IllegalStateException("缺少环境变量 " + key + "；请先加载 .env 配置");
+        }
+        return v.trim();
     }
 }

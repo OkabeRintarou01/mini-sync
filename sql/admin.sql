@@ -75,17 +75,12 @@ CREATE TABLE sys_user (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='系统用户';
 
 -- ---------------- 初始化数据 ----------------
+-- 管理库 schema 与开发者/环境无关的应用登录示例。
+-- 注意：数据源连接参数及同步任务不在 SQL 中预填：
+-- 1. 请登录控制台，通过界面手动创建数据源（口令不会写入仓库）
+-- 2. 再通过界面创建同步任务
+-- 3. sys_user 密码当前是 demo 级明文验证，生产环境应改用 BCrypt
 INSERT INTO sys_user (username, password, nickname) VALUES
-('admin', 'admin123', '舒卫东');
+('admin', 'admin123', 'mini-sync admin');
 
-INSERT INTO datasource_config
-    (ds_name, ds_type, host, port, database_name, username, password, remark) VALUES
-('本地源库',        'MYSQL',      '127.0.0.1', 3306, 'mini_sync_src', 'root',     's123456', 'MySQL 5.7 测试源'),
-('本地目标库',      'MYSQL',      '127.0.0.1', 3306, 'mini_sync_dst', 'root',     's123456', 'MySQL 5.7 测试目标'),
-('PostgreSQL 测试库', 'POSTGRESQL', '127.0.0.1', 5432, 'mini_sync_pg',  'postgres', 's123456', 'Docker 中的 PG 16');
-
-INSERT INTO sync_job
-    (job_name, source_datasource_id, source_table, target_datasource_id, target_table,
-     sync_type, cursor_field, batch_size, status) VALUES
-('MySQL 源库 → 目标库', 1, 't_order', 2, 't_order', 'FULL', 'id', 1000, 1),
-('MySQL 源库 → PostgreSQL', 1, 't_order', 3, 't_order', 'FULL', 'id', 1000, 1);
+-- 数据源与任务刻意留空，避免把任何数据库账号密码提交到版本库。

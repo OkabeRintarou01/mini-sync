@@ -46,14 +46,12 @@ plugins/*
 data/
 
 # ---------- 本地敏感配置 ----------
-# 注意：本项目是演示工程，数据库口令写在
-#   sql/init.sql、sql/admin.sql
-# 中便于本地一键复现。
-# 若推到公开仓库，请先评估是否可接受 —— 这是本地测试库口令，不是生产口令。
-*.local.properties
-*.env
+# .env 存放真实凭据，绝不提交。
+# .env.example 是模板（只含变量名与示例值），必须提交。
+.env
 .env.*
 !.env.example
+*.local.properties
 
 # ---------- 操作系统垃圾 ----------
 .DS_Store

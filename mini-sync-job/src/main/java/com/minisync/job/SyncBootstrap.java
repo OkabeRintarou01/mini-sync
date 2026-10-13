@@ -24,14 +24,25 @@ import java.util.Map;
 @Slf4j
 public class SyncBootstrap {
 
-    private static final String HOST = "127.0.0.1";
-    private static final int PORT = 3306;
-    private static final String USER = "root";
-    /** 优先从环境变量 MINISYNC_DB_PASSWORD 读取，避免把密码硬编码进代码库。 */
-    private static final String PASSWORD =
-            System.getenv("MINISYNC_DB_PASSWORD") != null
-                    ? System.getenv("MINISYNC_DB_PASSWORD")
-                    : "s123456";
+    private static final String HOST = env("MINISYNC_DB_HOST", "127.0.0.1");
+    private static final int PORT = Integer.parseInt(env("MINISYNC_DB_PORT", "3306"));
+    private static final String USER = env("MINISYNC_DB_USER", "root");
+    /** 密码必须从环境变量提供，源码不包含口令默认值。 */
+    private static final String PASSWORD = requiredEnv("MINISYNC_DB_PWD");
+
+    /** 取非敏感环境变量，为空时用默认值。 */
+    private static String env(String key, String fallback) {
+        String v = System.getenv(key);
+        return (v == null || v.trim().isEmpty()) ? fallback : v.trim();
+    }
+
+    private static String requiredEnv(String key) {
+        String v = System.getenv(key);
+        if (v == null || v.trim().isEmpty()) {
+            throw new IllegalStateException("缺少环境变量 " + key + "；请先加载 .env 配置");
+        }
+        return v.trim();
+    }
 
     public static void main(String[] args) {
         String mode = args.length > 0 ? args[0] : "full";

@@ -75,23 +75,39 @@ public class CrossDbBootstrap {
         pool.closeAll();
     }
 
+    // 账号口令统一从环境变量读，代码里不留明文
     private static DataSourceConfig mysqlConfig(String db) {
         DataSourceConfig c = new DataSourceConfig();
-        c.setHost("127.0.0.1");
-        c.setPort(3306);
+        c.setHost(env("MINISYNC_DB_HOST", "127.0.0.1"));
+        c.setPort(Integer.parseInt(env("MINISYNC_DB_PORT", "3306")));
         c.setDatabaseName(db);
-        c.setUsername("root");
-        c.setPassword("s123456");
+        c.setUsername(env("MINISYNC_DB_USER", "root"));
+        c.setPassword(requiredEnv("MINISYNC_DB_PWD"));
         return c;
     }
 
     private static DataSourceConfig pgConfig() {
         DataSourceConfig c = new DataSourceConfig();
-        c.setHost("127.0.0.1");
-        c.setPort(5432);
-        c.setDatabaseName("mini_sync_pg");
-        c.setUsername("postgres");
-        c.setPassword("s123456");
+        c.setHost(env("MINISYNC_PG_HOST", "127.0.0.1"));
+        c.setPort(Integer.parseInt(env("MINISYNC_PG_PORT", "5432")));
+        c.setDatabaseName(env("MINISYNC_PG_DB", "mini_sync_pg"));
+        c.setUsername(env("MINISYNC_PG_USER", "postgres"));
+        c.setPassword(requiredEnv("MINISYNC_PG_PWD"));
         return c;
+    }
+
+    /** 取非敏感环境变量，为空时用默认值。 */
+    private static String env(String key, String fallback) {
+        String v = System.getenv(key);
+        return (v == null || v.trim().isEmpty()) ? fallback : v.trim();
+    }
+
+    /** 敏感变量必须显式配置，不在源码中提供口令默认值。 */
+    private static String requiredEnv(String key) {
+        String v = System.getenv(key);
+        if (v == null || v.trim().isEmpty()) {
+            throw new IllegalStateException("缺少环境变量 " + key + "；请先加载 .env 配置");
+        }
+        return v.trim();
     }
 }

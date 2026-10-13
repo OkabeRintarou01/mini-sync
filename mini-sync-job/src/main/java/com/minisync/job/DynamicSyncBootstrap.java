@@ -30,12 +30,32 @@ import java.util.Map;
 @Slf4j
 public class DynamicSyncBootstrap {
 
+    // 管理库连接信息从环境变量读，代码里不落口令。
+    // 提供默认值只是为了 clone 下来能直接跑（本地开发库），
+    // 生产上通过部署配置注入即可，不需要改代码。
     private static final String ADMIN_URL =
-            "jdbc:mysql://127.0.0.1:3306/mini_sync_admin"
+            "jdbc:mysql://" + env("MINISYNC_ADMIN_HOST", "127.0.0.1")
+            + ":" + env("MINISYNC_ADMIN_PORT", "3306")
+            + "/" + env("MINISYNC_ADMIN_DB", "mini_sync_admin")
             + "?useUnicode=true&characterEncoding=utf8&useSSL=false"
             + "&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true";
-    private static final String ADMIN_USER = "root";
-    private static final String ADMIN_PWD = "s123456";
+    private static final String ADMIN_USER = env("MINISYNC_DB_USER", "root");
+    private static final String ADMIN_PWD = requiredEnv("MINISYNC_DB_PWD");
+
+    /** 取非敏感环境变量，为空时用默认值。 */
+    private static String env(String key, String fallback) {
+        String v = System.getenv(key);
+        return (v == null || v.trim().isEmpty()) ? fallback : v.trim();
+    }
+
+    /** 敏感变量必须显式配置，不在源码中提供口令默认值。 */
+    private static String requiredEnv(String key) {
+        String v = System.getenv(key);
+        if (v == null || v.trim().isEmpty()) {
+            throw new IllegalStateException("缺少环境变量 " + key + "；请复制 .env.example 为 .env 并填写数据库口令");
+        }
+        return v.trim();
+    }
 
     public static void main(String[] args) throws Exception {
         String mode = args.length > 0 ? args[0] : "cursor";

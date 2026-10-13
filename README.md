@@ -74,20 +74,65 @@
 - Docker（可选，用于 PostgreSQL）
 - Node.js 16+（可选，用于控制台）
 
+### 配置说明：凭据从环境变量读
+
+数据库账号口令从环境变量或 `.env` 文件注入，**仓库不提供默认密码**。先复制模板并自行填写密码：
+
+```powershell
+# 1. 复制模板并编辑密码项（不要把 .env 提交到 Git）
+Copy-Item .env.example .env
+notepad .env
+
+# 至少填写：
+# MINISYNC_DB_PWD=<你的 MySQL 密码>
+# MINISYNC_PG_PWD=<你的 PostgreSQL 密码>
+
+# 2. 在当前 PowerShell 进程加载 .env（不回显密码）
+Get-Content D:\mini-sync\.env | ForEach-Object {
+  if ($_ -match '^\s*([^#=]+)\s*=\s*(.*)$') {
+    [Environment]::SetEnvironmentVariable($matches[1].Trim(), $matches[2].Trim(), 'Process')
+  }
+}
+
+# 3. 启动控制台；Node 也会自动读取项目根目录下的 .env
+cd D:\mini-sync\web
+node server.js
+```
+
+Maven 启动的 Java 子进程会继承 Node/PowerShell 环境变量。单独运行 Maven 时，也要先运行上面的加载段。
+
+| 变量 | 用途 | 是否必须 |
+|---|---|---|
+| `MINISYNC_DB_PWD` | MySQL 管理库/源库密码 | **必须** |
+| `MINISYNC_DEFAULT_DS_PWD` | 控制台新建 MySQL/PG 数据源时的默认密码 | 可选；也可在表单中输入 |
+| `MINISYNC_DB_USER` | MySQL 用户名 | 否，默认 `root` |
+| `MINISYNC_PG_PWD` | PostgreSQL 密码 | 使用 PG 时必须 |
+| `MINISYNC_PG_USER` | PostgreSQL 用户名 | 否，默认 `postgres` |
+| `MINISYNC_ADMIN_HOST` / `MINISYNC_ADMIN_PORT` / `MINISYNC_ADMIN_DB` | 管理库连接 | 否，有本地默认值 |
+| `MINISYNC_PORT` | 控制台端口 | 否，默认 `8090` |
+| `MINISYNC_MVN` / `MINISYNC_JAVA_HOME` | 本机 Maven / JDK 路径 | 否，按本机安装位置配置 |
+
+> `.env` 已在 `.gitignore` 中排除；仓库只提交无密码值的 `.env.example`。
+> `sql/admin.sql` 不再初始化含口令的数据源和同步任务，首次运行请在控制台创建。
+
 ### 1. 准备测试数据（首次）
 
 ```powershell
-# MySQL 建库 + 造 10 万行
-Get-Content D:\mini-sync\sql\init.sql -Raw | & "C:\Program Files\MySQL\MySQL Server 5.7\bin\mysql.exe" -uroot -p<密码>
+# 先按“配置说明”创建并填写 D:\mini-sync\.env
 
-# 启动 PostgreSQL 容器
-docker run -d --name mini-sync-pg -e POSTGRES_PASSWORD=<密码> -p 5432:5432 postgres:16
+# MySQL 建库 + 造 10 万行（-p 交互提示密码）
+Get-Content D:\mini-sync\sql\init.sql -Raw | & $env:MINISYNC_MYSQL_BIN -u$env:MINISYNC_DB_USER -p
 
-# PG 建表造数据
-Get-Content D:\mini-sync\sql\pg_init.sql -Raw | docker exec -i mini-sync-pg psql -U postgres -d mini_sync_pg
+# 建管理库 schema 与演示登录用户（不预填任何数据库数据源口令）
+Get-Content D:\mini-sync\sql\admin.sql -Raw | & $env:MINISYNC_MYSQL_BIN -u$env:MINISYNC_DB_USER -p
 
-# 建管理库（数据源配置 / 任务配置 / 执行日志 / 用户）
-Get-Content D:\mini-sync\sql\admin.sql -Raw | & "C:\Program Files\MySQL\MySQL Server 5.7\bin\mysql.exe" -uroot -p<密码>
+# 启动 PostgreSQL 容器：密码取自本地 .env，不要把真实密码写进仓库/命令历史
+# 在已加载 .env 的 PowerShell 终端执行
+docker run -d --name mini-sync-pg -e POSTGRES_PASSWORD="$env:MINISYNC_PG_PWD" -p 5432:5432 postgres:16
+
+# PG 建表造数据（PGPASSWORD 从环境变量继承）
+$env:PGPASSWORD = $env:MINISYNC_PG_PWD
+Get-Content D:\mini-sync\sql\pg_init.sql -Raw | docker exec -e PGPASSWORD="$env:PGPASSWORD" -i mini-sync-pg psql -U $env:MINISYNC_PG_USER -d $env:MINISYNC_PG_DB
 ```
 
 ### 2. 编译（含插件打包）
@@ -221,8 +266,9 @@ SyncJobExecutor          ← 只依赖接口，不知道对面是 MySQL 还是 S
 
 打开 http://localhost:8090，默认账号 `admin` / 密码 `admin123`。
 
-> 演示级会话：token 存于服务内存，进程重启即失效；密码为明文比对。
-> 生产实现应换 JWT + Redis + BCrypt。
+> 演示级会话：token 存于服务内存，进程重启即失效。
+> 账号口令从 `sys_user` 表读取（`sql/admin.sql` 初始化），
+> 当前为明文比对，生产实现应换 BCrypt + JWT + Redis。
 
 ### 2. 数据源管理
 
@@ -395,7 +441,7 @@ plugins/ 目录下所有 *.jar
 | 控制台取数对插件类型较慢 | ~17 s。根因是 `Node → mvn.cmd → JVM` 每次查询都要起一个 Maven，不是 SQLite 本身慢 | 引擎改为常驻 Java 服务，Node 走 HTTP 反代（毫秒级） |
 | 全量同步无断点续传 | 全量从头跑到尾，进程被杀要重来（增量已有水位记录） | 按主键范围分段持久化位点 |
 | 同步条数为乐观计数 | `total += batch.size()`，未校验目标端实际写入行数 | 累加 `executeBatch()` 返回值，或比对写入前后行数差 |
-| 密码明文存储 | 管理库中 `datasource_config.password` 与 `sys_user.password` 均为明文 | 加密存储 + 密钥管理 |
+| 密码明文存储 | `sys_user.password` 明文比对；`datasource_config.password` 明文存插件连接口令 | BCrypt 存用户口令；数据源口令加密 + 密钥管理 |
 | 登录为演示级 | token 存服务内存，无过期机制 | JWT + Redis |
 
 ---
@@ -421,6 +467,7 @@ mvn -B clean install -pl mini-sync-job -am "-Dtest=PluginDriverRegistryTest" "-D
 | `sql/init.sql` | MySQL 建库 + 10 万行测试数据 |
 | `sql/pg_init.sql` | PostgreSQL 建表 + 测试数据 |
 | `sql/admin.sql` | 管理库四张表 + 初始数据 |
+| `.env.example` | 环境变量模板（含全部可配置项） |
 | `web/server.js` | 控制台接口服务 |
 | `web/login.html` | 登录页 |
 | `web/index.html` | 控制台主页面 |
