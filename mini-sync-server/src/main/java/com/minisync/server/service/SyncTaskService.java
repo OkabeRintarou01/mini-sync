@@ -9,6 +9,8 @@ import com.minisync.server.entity.SyncLog;
 import com.minisync.server.mapper.DatasourceConfigMapper;
 import com.minisync.server.mapper.SyncJobMapper;
 import com.minisync.server.mapper.SyncLogMapper;
+import com.minisync.server.store.RunStateStore;
+import com.minisync.server.store.SyncRunState;
 import com.minisync.spi.DataSourceConfig;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Async;
@@ -24,8 +26,11 @@ import org.springframework.stereotype.Service;
  * <pre>
  *   HTTP 触发 → 读任务/数据源配置 → 组装 SyncJobEntity + DataSourceConfig
  *            → SyncExecutionService.execute(...)   ← 与 CLI 共用
- *            → 结果写入 sync_log + 内存状态
+ *            → 结果写入 sync_log（MySQL，永久）+ 运行状态（可 Redis，临时）
  * </pre>
+ *
+ * <p>注意运行状态走的是 {@link RunStateStore} 抽象，而不是直接操作内存 ——
+ * 这样切换 Redis 时本类不用改。</p>
  */
 @Slf4j
 @Service
@@ -34,16 +39,16 @@ public class SyncTaskService {
     private final SyncJobMapper jobMapper;
     private final DatasourceConfigMapper dsMapper;
     private final SyncLogMapper logMapper;
-    private final SyncRunStateService runStateService;
+    private final RunStateStore runStateStore;
 
     public SyncTaskService(SyncJobMapper jobMapper,
                            DatasourceConfigMapper dsMapper,
                            SyncLogMapper logMapper,
-                           SyncRunStateService runStateService) {
+                           RunStateStore runStateStore) {
         this.jobMapper = jobMapper;
         this.dsMapper = dsMapper;
         this.logMapper = logMapper;
-        this.runStateService = runStateService;
+        this.runStateStore = runStateStore;
     }
 
     /**
@@ -55,14 +60,13 @@ public class SyncTaskService {
      */
     @Async("syncExecutor")
     public void executeAsync(Long jobId, String runId) {
-        SyncRunStateService.RunState st = runStateService.get(runId);
-        if (st == null) {
+        if (runStateStore.getRun(runId) == null) {
             log.warn("运行记录不存在，忽略: runId={}", runId);
             return;
         }
 
         try {
-            st.addLog("开始执行任务 " + jobId);
+            runStateStore.appendLog(runId, "开始执行任务 " + jobId);
 
             SyncJob job = jobMapper.selectById(jobId);
             if (job == null) {
@@ -75,11 +79,13 @@ public class SyncTaskService {
                 throw new IllegalStateException("任务的数据源不存在（可能已被删除）");
             }
 
-            st.addLog("方向: " + src.getDsType() + "(" + src.getDatabaseName() + ") → "
-                    + tgt.getDsType() + "(" + tgt.getDatabaseName() + ")");
-            st.addLog("模式: " + job.getSyncType()
-                    + ("INCREMENT".equalsIgnoreCase(job.getSyncType())
-                            ? "，增量字段 " + job.getIncrementField() : ""));
+            runStateStore.appendLog(runId,
+                    "方向: " + src.getDsType() + "(" + src.getDatabaseName() + ") → "
+                            + tgt.getDsType() + "(" + tgt.getDatabaseName() + ")");
+            runStateStore.appendLog(runId,
+                    "模式: " + job.getSyncType()
+                            + ("INCREMENT".equalsIgnoreCase(job.getSyncType())
+                                    ? "，增量字段 " + job.getIncrementField() : ""));
 
             // 管理库实体 → 引擎实体
             SyncJobEntity entity = toEngineEntity(job);
@@ -94,33 +100,31 @@ public class SyncTaskService {
                     // 水位落库：这里用 MyBatis-Plus 写回管理库
                     (id, water, pk, quiet) -> saveWatermark(id, water, pk, quiet));
 
-            st.setTotalCount(result.totalCount());
-            st.setCostMs(result.costMs());
-            st.setWatermark(result.watermark());
-            st.setStatus(result.success()
-                    ? SyncRunStateService.SUCCESS : SyncRunStateService.FAILED);
-            st.setErrorMsg(result.errorMsg());
-
-            st.addLog("同步条数: " + result.totalCount());
-            st.addLog("总耗时: " + result.costMs() + " ms");
+            runStateStore.appendLog(runId, "同步条数: " + result.totalCount());
+            runStateStore.appendLog(runId, "总耗时: " + result.costMs() + " ms");
             if (result.watermark() != null) {
-                st.addLog("水位已落库: " + result.watermark());
+                runStateStore.appendLog(runId, "水位已落库: " + result.watermark());
             }
             if (!result.success()) {
-                st.addLog("失败原因: " + result.errorMsg());
+                runStateStore.appendLog(runId, "失败原因: " + result.errorMsg());
             }
+
+            // 写入终态：状态/条数/耗时/水位/错误一并落库
+            runStateStore.finishRun(runId,
+                    result.success() ? SyncRunState.SUCCESS : SyncRunState.FAILED,
+                    result.totalCount(), result.costMs(),
+                    result.watermark(), result.errorMsg());
 
             writeSyncLog(job, result);
 
         } catch (Exception e) {
             log.error("异步同步执行异常: jobId={}", jobId, e);
-            st.setStatus(SyncRunStateService.FAILED);
-            st.setErrorMsg(e.getMessage());
-            st.addLog("异常: " + e.getMessage());
+            runStateStore.appendLog(runId, "异常: " + e.getMessage());
+            runStateStore.finishRun(runId, SyncRunState.FAILED, 0, 0L, null, e.getMessage());
         } finally {
-            st.setEndTime(java.time.LocalDateTime.now()
-                    .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
-            runStateService.unlockJob(jobId);
+            // 释放锁必须带 runId：只有锁还属于本次运行时才会被删掉。
+            // 否则可能出现"任务 A 超时后 B 拿到锁，A 跑完把 B 的锁删了"的连锁问题。
+            runStateStore.unlockJob(jobId, runId);
         }
     }
 

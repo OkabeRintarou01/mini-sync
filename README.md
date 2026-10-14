@@ -51,6 +51,7 @@
 | Maven | 3.9 | 包管理与多模块构建 |
 | Spring Boot | 3.3.5 | 常驻 Web 服务（控制台后端） |
 | MyBatis-Plus | 3.5.7 | 管理库持久层（数据源/任务/日志/用户） |
+| Redis | 7 | 跨实例共享的临时状态（任务锁 / 运行进度 / 登录会话） |
 | MySQL | 5.7 | 主库（源/目标/管理库） |
 | PostgreSQL | 16 | 异构数据源（Docker） |
 | SQLite | 3.45 | 第三方插件验证 |
@@ -58,19 +59,23 @@
 | SLF4J + Logback | 2.0 / 1.5 | 日志 |
 | Lombok | 1.18 | 样板代码简化 |
 | JUnit 5 | 5.10 | 单元测试 |
-| Docker | — | PostgreSQL 容器 |
+| Docker | — | PostgreSQL / Redis 容器 |
 
-**分层原则（重要）**：
+**三条存储边界（重要）**：
 
-- **管理库**（mini-sync 自己的配置表）→ 走 **MyBatis-Plus**
-- **被同步的源库/目标库** → 走 **插件驱动 + JDBC**，不经过 ORM
+| 数据 | 存哪 | 为什么 |
+|---|---|---|
+| 数据源配置 / 同步任务 / 执行历史 / 增量水位 | **MySQL** | 持久业务数据 + 可审计，丢了就是真丢了 |
+| 任务并发锁 / 运行进度与日志 / 登录会话 | **Redis** | 跨实例共享 + 可容忍过期，天然有生命周期 |
+| 被同步的源库 / 目标库 | **插件驱动 + JDBC** | 需在运行时按类型加载任意插件驱动，不能经 ORM |
 
-两者职责不同：前者是单表 CRUD，后者需要在运行时按类型加载任意插件驱动。
-把外部数据源也塞进 Mapper 会破坏插件化的核心价值。
+**判断标准**：只有「**多实例需要共享 + 可以容忍丢失/过期**」的数据才适合 Redis。
 
-**未使用（有意取舍）**：Redis、xxl-job、Flink。
-Redis 计划用于多实例场景下的任务锁与进度共享（当前单实例用内存即可）；
-后两者在这个规模下只会增加复杂度，不增加可讲的技术深度。
+- 把数据源配置放 Redis → 缓存一清空，配置全没了
+- 把运行进度只放 MySQL → 给高频写入的临时状态带来不必要的持久化压力
+
+**未使用（有意取舍）**：xxl-job、Flink。
+定时调度与分布式计算引擎在这个规模下只会增加复杂度，不增加可讲的技术深度。
 
 ---
 
@@ -266,10 +271,17 @@ mini-sync/
 │   │   └── HealthController                  健康检查
 │   ├── service\
 │   │   ├── SyncTaskService                   异步执行编排
-│   │   ├── SyncRunStateService               运行状态与进度（内存）
 │   │   ├── DatasourceProbeService            按配置连任意库执行 SQL
 │   │   ├── DriverRegistryService             暴露插件注册表
 │   │   └── AuthService                       登录认证（演示级）
+│   ├── store\                            ★ 跨实例共享状态的抽象
+│   │   ├── SyncRunState                      运行状态值对象（不可变）
+│   │   ├── RunStateStore                     接口：状态 + 任务锁
+│   │   ├── InMemoryRunStateStore             内存实现（单机默认）
+│   │   ├── RedisRunStateStore                Redis 实现（多实例）
+│   │   ├── SessionStore                      接口：登录会话
+│   │   ├── InMemorySessionStore              内存实现
+│   │   └── RedisSessionStore                 Redis 实现
 │   ├── mapper\                           4 个 MyBatis-Plus Mapper
 │   ├── entity\                           4 个实体
 │   └── resources\static\                 前端页面（登录 + 控制台）
@@ -342,7 +354,7 @@ SyncJobExecutor                     ⑤ 全量：主键游标分页
 源库 ──读取──► 内存批次 ──upsert──► 目标库
   │
   ▼
-写 sync_log + 更新内存运行状态
+写 sync_log（MySQL，永久）+ 更新运行状态（Redis，临时）
 ─────────────────────────────────────────────────────────────
 浏览器
   ▲  GET /api/run/status?runId=...   ⑦ 每 700ms 轮询一次进度与日志
@@ -354,8 +366,109 @@ SyncJobExecutor                     ⑤ 全量：主键游标分页
    否则 10 万条的同步会让请求挂几十秒，网关还可能超时掐断。
 2. **同步逻辑单一实现**：命令行入口和 Web 服务都调用 `SyncExecutionService`，
    只是水位落库的实现不同（JDBC vs MyBatis-Plus），避免"两条路径结果不一样"。
-3. **同任务并发保护**：`tryLockJob` 用 `putIfAbsent` 保证原子性，
+3. **同任务并发保护**：用 Redis `SET NX EX`（或内存 `putIfAbsent`）保证原子性，
    重复点击返回 409，而不是把同一份数据搬两遍。
+
+---
+
+## Redis 用在哪、为什么
+
+Redis 不是"为了技术栈齐全"加的，它解决的是**进程内状态在两种场景下失效**：
+
+| 场景 | 纯内存的问题 | Redis 怎么解决 |
+|---|---|---|
+| **服务重启** | 正在跑的任务进度全丢，用户进度条直接消失；所有人被登出 | 状态在外部，重启后照常读取 |
+| **多实例部署** | 实例 A 执行任务，请求负载均衡到实例 B → 查不到进度 | 状态在共享存储，任何实例都能读 |
+| **并发触发** | 各实例一把锁 → 同一任务被两个实例同时执行 → 数据搬两遍 | 分布式锁全局唯一 |
+
+### Key 设计
+
+| Key | 类型 | TTL | 说明 |
+|---|---|---|---|
+| `sync:lock:job:{jobId}` | String | **30 分钟** | 任务锁，值为持有者的 runId |
+| `sync:run:{runId}` | Hash | 24 小时 | 运行状态（状态/条数/耗时/水位） |
+| `sync:run:{runId}:logs` | List | 24 小时 | 日志行，`LTRIM` 只留最近 200 行 |
+| `sync:job:{jobId}:latest` | String | 24 小时 | 该任务最近一次 runId |
+| `sync:session:{token}` | String | **8 小时** | 登录会话（JSON，**不含密码**） |
+
+### 两个必须讲对的技术点
+
+**① 锁必须带 TTL**
+
+如果持有锁的进程崩溃且没来得及释放，没有 TTL 的话任务会被**永久卡住**，
+只能人工去 Redis 删 key。加了 TTL 后最多卡 TTL 那么久就自动恢复。
+
+**② 释放锁必须"值匹配才删"**
+
+```
+t0   实例 A 拿到锁（TTL 30min），开始跑一个很慢的任务
+t30  锁超时自动释放
+t31  实例 B 拿到锁，开始跑同一任务
+t32  A 终于跑完了，执行"释放锁"
+     → 如果直接 DEL，就把 B 的锁删掉了！
+     → 此时实例 C 又能拿到锁，同一个任务被并发执行
+```
+
+所以释放时要先比对值是不是自己的 runId。这个"比对 + 删除"**必须原子**，
+用 Lua 脚本实现：
+
+```lua
+if redis.call('get', KEYS[1]) == ARGV[1] then
+  return redis.call('del', KEYS[1])
+else
+  return 0
+end
+```
+
+### 可切换的设计（不只是"用了 Redis"）
+
+运行状态与会话都抽了接口，提供两套实现：
+
+```
+RunStateStore                     SessionStore
+├── InMemoryRunStateStore         ├── InMemorySessionStore
+└── RedisRunStateStore            └── RedisSessionStore
+        ↑ 由 minisync.redis.enabled 决定用哪个
+```
+
+**为什么这么做？**
+
+- **不装 Redis 也能跑**：默认 `true`，改成 `false` 即退回内存模式，零外部依赖
+- **实现可替换**：Controller / Service / 前端完全不感知用的是哪套
+- **面试可讲**：「我抽了接口做两套实现，因为**开发环境不该被迫装 Redis**，
+  而生产环境才需要跨实例共享」
+
+启动日志会明确告诉你当前用的是哪套：
+
+```
+StoreConfig : 运行状态存储: Redis（支持多实例共享，重启不丢）
+StoreConfig : 登录会话存储: Redis（重启不掉线，多实例共享）
+StoreConfig : Redis 连通性检查: PONG
+```
+
+### 启动 Redis
+
+```powershell
+# 方式一：Docker（推荐，与 PostgreSQL 一致）
+docker run -d --name mini-sync-redis -p 6379:6379 redis:7-alpine
+
+# 验证
+docker exec mini-sync-redis redis-cli ping   # 应返回 PONG
+
+# 方式二：不用 Redis（退回内存模式）
+#   在 .env 里设置 MINISYNC_REDIS_ENABLED=false
+```
+
+### 实测：Redis 带来的跨实例能力
+
+启动两个实例（8081 / 8082）后验证：
+
+| 测试 | 结果 |
+|---|---|
+| 实例 A 触发任务，实例 B 查进度 | ✅ B 读到 `RUNNING` + 实时日志 |
+| 实例 A 运行时，实例 B 触发同一任务 | ✅ 返回 **409**（被 A 的锁拦住） |
+| 实例 A 登录的 token，在 Redis 可见 | ✅ 会话跨实例共享 |
+| 任务结束后，实例 B 读到最终结果 | ✅ `SUCCESS / 100000 条 / 2533ms` |
 
 ---
 
@@ -363,9 +476,10 @@ SyncJobExecutor                     ⑤ 全量：主键游标分页
 
 ### 1. 登录系统
 
-打开 http://localhost:8081，默认账号 `admin` / 密码 `admin123`。
+打开 http://localhost:8081，默认账号 `admin` / `密码 admin123`。
 
-> 演示级会话：token 存于服务内存，进程重启即失效。
+> 演示级会话：会话默认存 Redis（8 小时有效），服务重启不掉线、多实例共享；
+> 把 `MINISYNC_REDIS_ENABLED` 设为 `false` 则退回进程内存（重启即失效）。
 > 账号口令从 `sys_user` 表读取（`sql/admin.sql` 初始化），
 > 当前为明文比对，生产实现应换 BCrypt + JWT + Redis。
 
@@ -536,21 +650,24 @@ plugins/ 目录下所有 *.jar
 
 | 限制 | 说明 | 生产方案 |
 |---|---|---|
-| 运行状态存内存 | 同步进度与日志存在 `SyncRunStateService` 的 `ConcurrentHashMap` 里：**服务重启后进度会丢**，多实例部署时读不到彼此的状态 | 换成 Redis（这一步已在计划中，届时只替换该类实现，Controller 与前端不用改） |
 | 新增插件需重启进程 | 未做热加载。JDK 9+ 起 `URLClassLoader` 不再是 `ClassLoader` 的公开子类型，且 classloader 卸载要求"类、实例、加载器三者均不可达"，中途卸载易造成连接泄漏 | 常驻配置中心 + 监听变更 |
 | 全量同步无断点续传 | 全量从头跑到尾，进程被杀要重来（增量已有逐批水位） | 按主键范围分段持久化位点 |
 | 同步条数为乐观计数 | `total += batch.size()`，未校验目标端实际写入行数 | 累加 `executeBatch()` 返回值，或比对写入前后行数差 |
 | 密码明文存储 | `sys_user.password` 明文比对；`datasource_config.password` 明文存插件连接口令 | BCrypt 存用户口令；数据源口令加密 + 密钥管理 |
-| 登录为演示级 | token 存服务内存，无过期机制；接口本身<b>未做鉴权拦截</b>（前端靠 localStorage 判断） | JWT + 拦截器统一校验 |
+| 登录为演示级 | 接口本身<b>未做鉴权拦截</b>（前端靠 localStorage 判断）；密码明文比对 | JWT + 拦截器统一校验 |
 | 管理库连接未池化 | 每次同步新建 `DataSourcePool`，执行完关闭 | 复用 HikariCP 连接池 |
+| 无失败重试 | 只有 upsert 幂等，没有自动重试/退避 | 加重试工具类 + `sync_error_log` 表 |
+| Redis 未做降级 | Redis 挂了会让共享状态不可用（服务本身仍能启动） | 加熔断与本地兜底缓存 |
 
-### 已解决的性能问题（阶段二）
+### 已解决的问题
 
 | 项目 | 之前 | 现在 |
 |---|---|---|
 | 数据源列表（含 4 个库行数探测） | 17.2 s | **0.2 s** |
 | 触发同步的 HTTP 返回 | 阻塞几十秒 | **9 ms**（异步） |
 | 控制台后端 | Node 外挂进程 | Spring Boot 常驻服务 |
+| **运行状态与锁** | 只在单进程内存里 | **Redis 跨实例共享**（重启不丢、多实例可见） |
+| **登录会话** | 进程内存，重启掉线 | **Redis 存储**，重启不掉线、多实例共享 |
 
 ---
 

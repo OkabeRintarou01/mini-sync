@@ -9,8 +9,9 @@ import com.minisync.server.mapper.DatasourceConfigMapper;
 import com.minisync.server.mapper.SyncJobMapper;
 import com.minisync.server.mapper.SyncLogMapper;
 import com.minisync.server.service.DatasourceProbeService;
-import com.minisync.server.service.SyncRunStateService;
 import com.minisync.server.service.SyncTaskService;
+import com.minisync.server.store.RunStateStore;
+import com.minisync.server.store.SyncRunState;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -40,20 +41,20 @@ public class RunController {
     private final DatasourceConfigMapper dsMapper;
     private final SyncLogMapper logMapper;
     private final DatasourceProbeService probeService;
-    private final SyncRunStateService runStateService;
+    private final RunStateStore runStateStore;
     private final SyncTaskService syncTaskService;
 
     public RunController(SyncJobMapper jobMapper,
                          DatasourceConfigMapper dsMapper,
                          SyncLogMapper logMapper,
                          DatasourceProbeService probeService,
-                         SyncRunStateService runStateService,
+                         RunStateStore runStateStore,
                          SyncTaskService syncTaskService) {
         this.jobMapper = jobMapper;
         this.dsMapper = dsMapper;
         this.logMapper = logMapper;
         this.probeService = probeService;
-        this.runStateService = runStateService;
+        this.runStateStore = runStateStore;
         this.syncTaskService = syncTaskService;
     }
 
@@ -83,9 +84,11 @@ public class RunController {
 
         // 防止同一任务被并发触发：两个请求同时点，只有一个能拿到锁。
         // 否则同一份数据会被搬两遍，浪费资源还可能造成目标端行数翻倍。
-        com.minisync.server.service.SyncRunStateService.RunState st =
-                runStateService.create(jobId, job.getJobName(), syncType);
-        if (!runStateService.tryLockJob(jobId, st.getRunId())) {
+        //
+        // 注意顺序：先建运行记录并拿锁，拿锁失败就直接返回。
+        // 反过来的话（先建记录再拿锁）会留下一条永远不会被推进的孤儿记录。
+        SyncRunState st = runStateStore.createRun(jobId, job.getJobName(), syncType);
+        if (!runStateStore.tryLockJob(jobId, st.getRunId())) {
             return R.fail(409, "该任务正在执行中，请等待完成或查看进度");
         }
 
@@ -96,7 +99,7 @@ public class RunController {
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("runId", st.getRunId());
         data.put("jobId", String.valueOf(jobId));
-        data.put("status", SyncRunStateService.RUNNING);
+        data.put("status", SyncRunState.RUNNING);
         data.put("message", "任务已提交，请通过 /api/run/status?runId= 查询进度");
         return R.of(200, null, data);
     }
@@ -104,7 +107,7 @@ public class RunController {
     /** 查询运行进度与日志 */
     @GetMapping("/run/status")
     public Map<String, Object> runStatus(@RequestParam("runId") String runId) {
-        SyncRunStateService.RunState st = runStateService.get(runId);
+        SyncRunState st = runStateStore.getRun(runId);
         if (st == null) {
             return R.fail(404, "运行记录不存在或已过期");
         }
@@ -114,10 +117,10 @@ public class RunController {
     /** 查询某任务最近一次运行（前端刷新页面后恢复显示用） */
     @GetMapping("/run/latest")
     public Map<String, Object> runLatest(@RequestParam("jobId") Long jobId) {
-        SyncRunStateService.RunState st = runStateService.latestByJob(jobId);
+        SyncRunState st = runStateStore.latestByJob(jobId);
         if (st == null) {
             Map<String, Object> empty = new LinkedHashMap<>();
-            empty.put("status", "NOT_FOUND");
+            empty.put("status", SyncRunState.NOT_FOUND);
             return R.data(empty);
         }
         return R.data(st.toMap());
