@@ -34,12 +34,17 @@ CREATE TABLE sync_job (
     source_table         VARCHAR(128) NOT NULL DEFAULT 't_order',
     target_datasource_id BIGINT       NOT NULL COMMENT '目标数据源 ID',
     target_table         VARCHAR(128) NOT NULL DEFAULT 't_order',
-    sync_type            VARCHAR(16)  NOT NULL DEFAULT 'FULL',
-    increment_field      VARCHAR(64)  DEFAULT NULL,
-    cursor_field         VARCHAR(64)  DEFAULT 'id',
+    sync_type            VARCHAR(16)  NOT NULL DEFAULT 'FULL' COMMENT 'FULL 全量 / INCREMENT 增量',
+    increment_field      VARCHAR(64)  DEFAULT NULL COMMENT '增量字段，如 update_time',
+    cursor_field         VARCHAR(64)  DEFAULT 'id' COMMENT '主键字段，复合游标的第二分量',
     batch_size           INT          NOT NULL DEFAULT 1000,
-    last_offset          VARCHAR(64)  DEFAULT NULL,
-    last_pk              BIGINT       DEFAULT 0,
+    -- 复合游标 (last_offset, last_pk)：
+    --   last_offset 是「水位字段的值」，通常是时间戳字符串，所以是 VARCHAR 不是数字
+    --   last_pk     是「主键的值」，所以是 BIGINT
+    -- 两者类型不能互换，否则水位会失效。
+    last_offset          VARCHAR(64)  DEFAULT NULL COMMENT '水位字段值（时间戳字符串）',
+    last_pk              BIGINT       DEFAULT 0    COMMENT '主键值（数字）',
+    last_sync_time       DATETIME     DEFAULT NULL COMMENT '上次同步完成时间',
     status               TINYINT      NOT NULL DEFAULT 1,
     create_time          DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     update_time          DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

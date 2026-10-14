@@ -156,6 +156,22 @@ public class SyncJobExecutor {
                                            DataSourceDriver source,
                                            DataSourceDriver target,
                                            Map<String, String> fieldMapping) {
+        return executeIncrementSync(job, source, target, fieldMapping, null);
+    }
+
+    /**
+     * 增量同步（带批次回调）。
+     *
+     * @param onBatchCommitted 每批成功写入后的回调，参数为 (水位值, 主键值)。
+     *                         传入非 null 时，调用方可以在这里把水位落库，
+     *                         从而让"进程被强杀"也能保住已完成批次 —— 这是断点续传的关键。
+     *                         回调本身抛异常不应中断同步，实现方需自行兜住。
+     */
+    public SyncResult executeIncrementSync(SyncJobEntity job,
+                                           DataSourceDriver source,
+                                           DataSourceDriver target,
+                                           Map<String, String> fieldMapping,
+                                           BatchWatermarkListener onBatchCommitted) {
 
         String waterField = job.getIncrementField();
         if (waterField == null || waterField.trim().isEmpty()) {
@@ -219,10 +235,23 @@ public class SyncJobExecutor {
                 throw new IllegalStateException("水位字段或主键出现空值，无法推进游标");
             }
 
-            lastWater = String.valueOf(waterValue);
+            lastWater = formatWatermark(waterValue);
             lastPk = ((Number) pkValue).longValue();
             maxWaterSynced = lastWater;
             maxPkSynced = lastPk;
+
+            // 每批成功提交后立刻回调，让调用方把水位落库。
+            // 这样即使进程随后被杀，已完成批次的位置也不会丢。
+            if (onBatchCommitted != null) {
+                try {
+                    onBatchCommitted.onBatchCommitted(lastWater, lastPk);
+                } catch (Exception cbEx) {
+                    // 水位落库失败不阻断同步本身：数据已经写进目标端了，
+                    // 只是下次可能多扫一点（幂等 upsert 保证无害）。
+                    log.warn("批次水位回调失败（不影响本批数据，仅影响续传精度）: {}",
+                            cbEx.getMessage());
+                }
+            }
 
             log.info("增量同步进行中, jobId={}, 已同步={}, 当前水位={}/{}",
                     job.getId(), total, lastWater, lastPk);
@@ -296,6 +325,50 @@ public class SyncJobExecutor {
         return (field == null || field.trim().isEmpty()) ? "id" : field;
     }
 
+    /**
+     * 把水位值转成「可以被 SQL 直接比较」的字符串。
+     *
+     * <p><b>为什么不直接用 {@code String.valueOf()}？</b></p>
+     *
+     * <p>JDBC 从 MySQL 的 DATETIME 列取出来的是 {@link java.sql.Timestamp}，
+     * 它的 {@code toString()} 会产出 {@code 2026-01-01T00:00} 这种形式 ——
+     * 中间是 ISO 的 {@code T} 分隔符，而且<b>秒被截掉了</b>。</p>
+     *
+     * <p>这个值会作为参数回填进下一轮的
+     * {@code WHERE (water > ?) OR (water = ? AND pk > ?)}。
+     * MySQL 虽然能容忍 {@code T} 分隔符，但"丢掉秒"是实打实的问题：
+     * 同一分钟内的数据会被算作"水位相同"，第一轮复合游标靠主键还能推进，
+     * 一旦跨分钟就会出错。</p>
+     *
+     * <p>所以这里统一格式化成 {@code yyyy-MM-dd HH:mm:ss.SSS}，
+     * 与 MySQL DATETIME 的自然字面量一致，比较行为可预期。</p>
+     */
+    private String formatWatermark(Object waterValue) {
+        if (waterValue == null) {
+            return null;
+        }
+        // MySQL Connector/J 8+ 对 DATETIME 列默认返回 LocalDateTime，
+        // 而 LocalDateTime.toString() 会产出 "2026-01-01T00:00"（带 T、丢秒），
+        // 必须显式格式化，不能直接 String.valueOf。
+        if (waterValue instanceof java.time.LocalDateTime) {
+            return ((java.time.LocalDateTime) waterValue)
+                    .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+        }
+        if (waterValue instanceof java.time.LocalDate) {
+            return ((java.time.LocalDate) waterValue).toString();
+        }
+        if (waterValue instanceof java.sql.Timestamp) {
+            return new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS")
+                    .format((java.sql.Timestamp) waterValue);
+        }
+        if (waterValue instanceof java.util.Date) {
+            return new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS")
+                    .format((java.util.Date) waterValue);
+        }
+        // 数字型水位（例如用自增 id 做增量字段）直接转字符串即可
+        return String.valueOf(waterValue);
+    }
+
     private int resolveBatchSize(SyncJobEntity job) {
         Integer size = job.getBatchSize();
         return (size == null || size <= 0) ? DEFAULT_BATCH_SIZE : size;
@@ -305,10 +378,25 @@ public class SyncJobExecutor {
     // 结果对象
     // ==================================================================
 
+    // ==================================================================
+    // 批次回调
+    // ==================================================================
+
+    /**
+     * 每批成功写入后的回调。
+     *
+     * <p>用于让调用方把水位<b>逐批</b>落库，从而支持"进程被强杀后仍能续传"。
+     * 如果只在同步全部结束时落库一次，中途被杀就会丢失全部进度，
+     * 下次只能从头重扫（数据不会错，因为 upsert 幂等，但时间白花了）。</p>
+     */
+    @FunctionalInterface
+    public interface BatchWatermarkListener {
+        void onBatchCommitted(String water, long pk) throws Exception;
+    }
+
     /** 同步水位：水位字段值 + 主键值，两者共同定位进度。 */
     @Data
-    public static class Watermark {
-        private final String water;
+    public static class Watermark {        private final String water;
         private final long pk;
 
         public Watermark(String water, long pk) {

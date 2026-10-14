@@ -266,33 +266,42 @@ async function countRows(ds, table) {
 
 // ------------------------------------------------------------------
 // 同步执行
+//
+// 只把 jobId 传给 Java 引擎，任务配置（同步模式、增量字段、水位）由引擎从库里读。
+// 这样 Node 侧不需要知道任务细节，也避免位置参数传错。
 // ------------------------------------------------------------------
-function runSync(job, mode, batchSize) {
+function runSync(job) {
     return new Promise((resolve) => {
         const t0 = Date.now();
         const env = Object.assign({}, process.env, { JAVA_HOME });
-        // 统一走 CrossDbBootstrap，由它根据源/目标类型自动选择驱动
-        const args = [mode, batchSize,
-            String(job.source_datasource_id), String(job.target_datasource_id),
-            job.source_table, job.target_table].join(' ');
 
         execFile(MVN, [
             '-B', '-q', '-pl', 'mini-sync-job', 'exec:java',
             '-Dexec.mainClass=com.minisync.job.DynamicSyncBootstrap',
-            '-Dexec.args=' + args
+            '-Dexec.args=' + String(job.id)
         ], { cwd: PROJECT, env, maxBuffer: 20 * 1024 * 1024, timeout: 600000 },
             (err, stdout, stderr) => {
                 const out = (stdout || '') + (stderr || '');
+                // 这两行的格式必须与 Java 侧保持一致，否则界面统计会变成 0
                 const m = out.match(/总耗时\s*:\s*(\d+)\s*ms/);
                 const c = out.match(/同步条数:\s*(\d+)/);
+                const fe = out.match(/同步失败:\s*(.+)/);
+                const wm = out.match(/水位已落库: jobId=\d+, last_offset=([^,]+), last_pk=(\d+)/);
+
                 resolve({
                     jobId: job.id,
-                    mode,
+                    mode: job.sync_type || 'FULL',
                     costMs: m ? parseInt(m[1]) : 0,
                     totalCount: c ? parseInt(c[1]) : 0,
+                    watermark: wm ? (wm[1].trim() + ' / ' + wm[2]) : null,
                     wallMs: Date.now() - t0,
                     success: !!m,
-                    raw: out.split(/\r?\n/).filter(l => l.includes('INFO') || l.includes('ERROR')).slice(-30)
+                    // 失败时把原因带出去，界面与 sync_log 都能看到
+                    errorMsg: m ? null
+                        : (fe ? fe[1].trim()
+                              : String(err ? err.message : '未知错误').slice(0, 300)),
+                    raw: out.split(/\r?\n/)
+                        .filter(l => l.includes('INFO') || l.includes('ERROR')).slice(-30)
                 });
             });
     });
@@ -549,6 +558,15 @@ const server = http.createServer(async (req, res) => {
             if (!b.job_name || !b.source_datasource_id || !b.target_datasource_id) {
                 return json(res, { code: 400, msg: '任务名与源/目标数据源不能为空' });
             }
+
+            // 注意：数据库里的列叫 sync_type（不是 sync_mode）
+            const syncType = String(b.sync_type || 'FULL').toUpperCase() === 'INCREMENT'
+                ? 'INCREMENT' : 'FULL';
+            const incField = syncType === 'INCREMENT' ? String(b.increment_field || '').trim() : null;
+            if (syncType === 'INCREMENT' && !incField) {
+                return json(res, { code: 400, msg: '增量模式必须填写「增量字段」，如 update_time' });
+            }
+
             if (b.id) {
                 await query(`UPDATE sync_job SET
                     job_name=${sqlEscape(b.job_name)},
@@ -556,6 +574,8 @@ const server = http.createServer(async (req, res) => {
                     source_table=${sqlEscape(b.source_table || 't_order')},
                     target_datasource_id=${parseInt(b.target_datasource_id)},
                     target_table=${sqlEscape(b.target_table || 't_order')},
+                    sync_type=${sqlEscape(syncType)},
+                    increment_field=${sqlEscape(incField)},
                     batch_size=${parseInt(b.batch_size) || 1000},
                     status=${parseInt(b.status) || 1}
                     WHERE id=${parseInt(b.id)}`, ADMIN_DB);
@@ -563,12 +583,24 @@ const server = http.createServer(async (req, res) => {
             }
             await query(`INSERT INTO sync_job
                 (job_name, source_datasource_id, source_table, target_datasource_id, target_table,
-                 sync_type, cursor_field, batch_size, status)
+                 sync_type, increment_field, cursor_field, batch_size, status)
                 VALUES (${sqlEscape(b.job_name)}, ${parseInt(b.source_datasource_id)},
                         ${sqlEscape(b.source_table || 't_order')}, ${parseInt(b.target_datasource_id)},
-                        ${sqlEscape(b.target_table || 't_order')}, 'FULL', 'id',
+                        ${sqlEscape(b.target_table || 't_order')}, ${sqlEscape(syncType)},
+                        ${sqlEscape(incField)}, 'id',
                         ${parseInt(b.batch_size) || 1000}, ${parseInt(b.status) || 1})`, ADMIN_DB);
             return json(res, { code: 200, msg: '新增成功' });
+        }
+
+        // ---------- 重置水位（增量任务从头上重跑） ----------
+        if (p === '/api/job/resetwatermark') {
+            const id = parseInt(url.searchParams.get('id'));
+            const rows = await query('SELECT id, job_name FROM sync_job WHERE id=' + id, ADMIN_DB);
+            if (!rows.length) return json(res, { code: 404, msg: '任务不存在' });
+            await query(`UPDATE sync_job
+                         SET last_offset=NULL, last_pk=0, last_sync_time=NULL
+                         WHERE id=${id}`, ADMIN_DB);
+            return json(res, { code: 200, msg: '已重置「' + rows[0].job_name + '」的水位' });
         }
 
         if (p === '/api/job/delete') {
@@ -580,17 +612,24 @@ const server = http.createServer(async (req, res) => {
         // ---------- 触发同步 ----------
         if (p === '/api/run') {
             const jobId = parseInt(url.searchParams.get('jobId'));
-            const mode = url.searchParams.get('mode') || 'cursor';
             const rows = await query('SELECT * FROM sync_job WHERE id=' + jobId, ADMIN_DB);
             if (!rows.length) return json(res, { code: 404, msg: '任务不存在' });
 
             const job = rows[0];
-            const r = await runSync(job, mode, job.batch_size || 1000);
+            const syncType = String(job.sync_type || 'FULL').toUpperCase();
+            // 提前拦截：增量任务缺增量字段时，Java 侧也会报错，但这里给更友好的提示
+            if (syncType === 'INCREMENT' && !job.increment_field) {
+                return json(res, { code: 400, msg: '增量任务未配置「增量字段」，请先修改任务' });
+            }
 
+            const r = await runSync(job);
+
+            // 失败时把错误信息也写进日志，界面上可直接看到原因
             await query(`INSERT INTO sync_log
                 (job_id, job_name, sync_mode, total_count, cost_ms, success, error_msg)
-                VALUES (${job.id}, ${sqlEscape(job.job_name)}, ${sqlEscape(mode)},
-                        ${r.totalCount}, ${r.costMs}, ${r.success ? 1 : 0}, NULL)`, ADMIN_DB);
+                VALUES (${job.id}, ${sqlEscape(job.job_name)}, ${sqlEscape(syncType)},
+                        ${r.totalCount}, ${r.costMs}, ${r.success ? 1 : 0},
+                        ${sqlEscape(r.errorMsg)})`, ADMIN_DB);
 
             return json(res, { code: 200, data: r });
         }

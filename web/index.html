@@ -229,12 +229,14 @@
               <th>源数据源</th>
               <th>目标数据源</th>
               <th style="width:70px">批次</th>
+              <th style="width:90px">模式</th>
+              <th style="width:190px">上次水位</th>
               <th style="width:80px">状态</th>
-              <th style="width:150px;white-space:nowrap">操作</th>
+              <th style="width:190px;white-space:nowrap">操作</th>
             </tr>
           </thead>
           <tbody id="jobTable">
-            <tr><td colspan="7" style="text-align:center;color:#8a919f;padding:30px;">加载中…</td></tr>
+            <tr><td colspan="9" style="text-align:center;color:#8a919f;padding:30px;">加载中…</td></tr>
           </tbody>
         </table>
         <div class="card-body" style="border-top:1px solid #f2f4f7;">
@@ -408,7 +410,20 @@
         <label>批次大小</label>
         <input type="number" id="jobBatch" value="1000">
       </div>
-      <div class="hint">同步时会按两端数据源的类型自动选择驱动，支持 MySQL 与 PostgreSQL 任意组合。</div>
+      <div class="form-2">
+        <div class="form-row">
+          <label>同步模式 *</label>
+          <select id="jobSyncType" onchange="onSyncTypeChange()">
+            <option value="FULL">全量（每次搬整表）</option>
+            <option value="INCREMENT">增量（按水位只搬变更）</option>
+          </select>
+        </div>
+        <div class="form-row" id="rowIncrementField">
+          <label>增量字段 *</label>
+          <input type="text" id="jobIncrementField" placeholder="update_time">
+        </div>
+      </div>
+      <div class="hint" id="jobModeHint"></div>
     </div>
     <div class="modal-foot">
       <button class="btn ghost" onclick="closeModal('jobMask')">取消</button>
@@ -745,26 +760,38 @@ async function loadJobs() {
   const r = await fetch('/api/job/list').then(x => x.json());
   jobCache = r.data || [];
   document.getElementById('jobTable').innerHTML = jobCache.length ? jobCache.map(j => {
-    // 关键：三个操作按钮放在同一行，且用 nowrap + 固定列宽，
-    // 否则「删除」会像之前那样被挤到第二行
+    const isInc = String(j.sync_type || 'FULL').toUpperCase() === 'INCREMENT';
+    const mode = isInc
+      ? '<span class="badge pg">增量</span>'
+      : '<span class="badge gray">全量</span>';
+    // 水位只在增量任务上有意义；全量任务显示「—」
+    const wm = isInc
+      ? (j.last_offset
+          ? `<span class="mono" style="font-size:12px" title="${escapeAttr('last_offset=' + j.last_offset + '  last_pk=' + j.last_pk + (j.last_sync_time ? '  时间=' + j.last_sync_time : ''))}">${shorten(String(j.last_offset), 19)} / ${j.last_pk}</span>`
+          : '<span class="cnt-na" title="尚未同步过，首次将全范围读取">未开始</span>')
+      : '<span class="cnt-na">—</span>';
     return `
     <tr>
       <td>${j.id}</td>
-      <td><b>${j.job_name}</b></td>
+      <td><b>${j.job_name}</b>${isInc && j.increment_field
+            ? '<div style="font-size:12px;color:#8a919f;">增量字段: ' + escapeAttr(j.increment_field) + '</div>' : ''}</td>
       <td><span class="badge ${badgeCls(j.sourceType)}">${j.sourceType || '-'}</span>
           ${j.sourceName || '-'}</td>
       <td><span class="badge ${badgeCls(j.targetType)}">${j.targetType || '-'}</span>
           ${j.targetName || '-'}</td>
       <td class="mono">${j.batch_size}</td>
+      <td>${mode}</td>
+      <td>${wm}</td>
       <td><span class="badge ok">启用</span></td>
       <td style="white-space:nowrap">
         <span class="link" onclick="goRun(${j.id})">执行</span>
         <span class="link" onclick="openJobModal(${j.id})">修改</span>
+        ${isInc ? `<span class="link" onclick="resetWatermark(${j.id})">重置水位</span>` : ''}
         <span class="link red" onclick="delJob(${j.id})">删除</span>
       </td>
     </tr>`;
   }).join('')
-    : '<tr><td colspan="7" style="text-align:center;color:#8a919f;padding:30px;">暂无任务</td></tr>';
+    : '<tr><td colspan="9" style="text-align:center;color:#8a919f;padding:30px;">暂无任务</td></tr>';
   fillSelects();
 }
 
@@ -772,6 +799,15 @@ function fillSelects() {
   const opts = dsCache.map(d => `<option value="${d.id}">${d.ds_name}（${d.ds_type}·${d.database_name}）</option>`).join('');
   document.getElementById('jobSource').innerHTML = opts;
   document.getElementById('jobTarget').innerHTML = opts;
+}
+
+/** 切换任务模式时，决定是否显示「增量字段」 */
+function onSyncTypeChange() {
+  const isInc = document.getElementById('jobSyncType').value === 'INCREMENT';
+  toggleFieldRow('rowIncrementField', isInc);
+  document.getElementById('jobModeHint').textContent = isInc
+    ? '增量模式：按「增量字段 + 主键」复合游标推进，每批成功后把水位写回数据库，中断后可续传。'
+    : '全量模式：每次按主键游标分页搬整表，不维护水位。';
 }
 
 function openJobModal(id) {
@@ -785,6 +821,9 @@ function openJobModal(id) {
   document.getElementById('jobSourceTable').value = j ? j.source_table : 't_order';
   document.getElementById('jobTargetTable').value = j ? j.target_table : 't_order';
   document.getElementById('jobBatch').value = j ? j.batch_size : 1000;
+  document.getElementById('jobSyncType').value = j ? (j.sync_type || 'FULL') : 'FULL';
+  document.getElementById('jobIncrementField').value = j ? (j.increment_field || '') : 'update_time';
+  onSyncTypeChange();
   document.getElementById('jobMask').classList.add('show');
 }
 
@@ -796,11 +835,16 @@ async function saveJob() {
     source_table: document.getElementById('jobSourceTable').value.trim(),
     target_datasource_id: document.getElementById('jobTarget').value,
     target_table: document.getElementById('jobTargetTable').value.trim(),
-    batch_size: document.getElementById('jobBatch').value
+    batch_size: document.getElementById('jobBatch').value,
+    sync_type: document.getElementById('jobSyncType').value,
+    increment_field: document.getElementById('jobIncrementField').value.trim()
   };
   if (!body.job_name) return toast('请填写任务名称');
   if (body.source_datasource_id === body.target_datasource_id) {
     return toast('源和目标不能是同一个数据源');
+  }
+  if (body.sync_type === 'INCREMENT' && !body.increment_field) {
+    return toast('增量模式需要填写增量字段');
   }
 
   const r = await fetch('/api/job/save', {
@@ -810,6 +854,14 @@ async function saveJob() {
 
   toast(r.msg || '已保存');
   if (r.code === 200) { closeModal('jobMask'); loadJobs(); }
+}
+
+/** 重置水位：增量任务从头上重跑 */
+async function resetWatermark(id) {
+  if (!confirm('确认重置该任务的水位？下次增量同步将从表头重新开始。')) return;
+  const r = await fetch('/api/job/resetwatermark?id=' + id).then(x => x.json());
+  toast(r.msg || '已重置');
+  loadJobs();
 }
 
 async function delJob(id) {
@@ -844,14 +896,29 @@ async function doRun() {
 
   logLine('开始执行任务 ID=' + jobId, 'hl');
   try {
-    const d = (await fetch('/api/run?jobId=' + jobId + '&mode=cursor').then(x => x.json())).data;
+    const d = (await fetch('/api/run?jobId=' + jobId).then(x => x.json())).data;
     (d.raw || []).forEach(l => logLine(l.replace(/^\S+\s+\S+\s+\S+\s+\S+\s+-\s+/, '')));
-    logLine('同步条数：' + d.totalCount + ' 条', 'ok');
-    logLine('总耗时：' + d.costMs + ' ms', 'ok');
-    document.getElementById('runResult').innerHTML =
-      `<div style="padding:12px 16px;background:#e7f7f0;border-radius:6px;color:#17a673;">
-        同步成功：${d.totalCount.toLocaleString()} 条，耗时 ${d.costMs} ms
-       </div>`;
+
+    // 注意：Java 引擎失败时进程退出码非 0，但 HTTP 仍是 200，
+    // 所以必须判断 d.success，不能只靠 try/catch。
+    if (!d.success) {
+      logLine('同步失败：' + (d.errorMsg || '未知原因'), 'err');
+      document.getElementById('runResult').innerHTML =
+        `<div style="padding:12px 16px;background:#fdeaea;border-radius:6px;color:#d9534f;">
+           同步失败：${escapeAttr(d.errorMsg || '未知原因')}
+         </div>`;
+    } else {
+      logLine('同步条数：' + d.totalCount + ' 条', 'ok');
+      logLine('总耗时：' + d.costMs + ' ms', 'ok');
+      if (d.watermark) logLine('水位已落库：' + d.watermark, 'ok');
+      document.getElementById('runResult').innerHTML =
+        `<div style="padding:12px 16px;background:#e7f7f0;border-radius:6px;color:#17a673;">
+          同步成功：${(d.totalCount || 0).toLocaleString()} 条，耗时 ${d.costMs} ms
+          ${d.watermark
+            ? '<div style="margin-top:6px;font-size:12px;color:#4a7c2f;">水位已落库：' + escapeAttr(d.watermark) + '</div>'
+            : ''}
+         </div>`;
+    }
   } catch (e) {
     logLine('执行失败：' + e.message, 'err');
   }
