@@ -298,32 +298,34 @@ String targetClassName = PACKAGE_PREFIX + dsType + "driver." + PascalCase(dsType
 插件化不只影响「同步」，控制台的**行数统计、数据预览、清空表**同样要支持插件类型，
 否则界面上会显示 `0` 或"离线"，让人误以为插件没生效。
 
-### 9.1 双通道设计
+### 9.1 演进过程：从双通道到统一走驱动
 
-最初 `server.js` 按类型分支：MySQL 用 `mysql.exe`，PG 用 `docker exec psql`。
-这有两个问题：每加一种数据源就要改 Node 代码；SQLite / ClickHouse 这类
-**只在插件 jar 里有 JDBC 驱动**的类型，本地根本没有工具可用。
+**阶段一（Node 控制台）**：`server.js` 按类型分支 —— MySQL 用 `mysql.exe`，
+PG 用 `docker exec psql`，其它类型只能起 Maven 调 Java（约 17 秒）。
+问题有两个：每加一种数据源就要改 Node 代码；SQLite / ClickHouse 这类
+**只在插件 jar 里有 JDBC 驱动**的类型，本地根本没有命令行工具可用。
 
-现在改成双通道：
+**阶段二（Spring Boot 常驻服务）**：全部统一走 `DatasourceProbeService`，
+它内部调用 `DataSourceDriverFactory`，让插件机制去选驱动。
+于是**新加插件类型时，控制台自动就能用**，一行代码都不用改。
 
-| 类型 | 通道 | 单次耗时 |
+| 类型 | 阶段一（Node） | 阶段二（常驻服务） |
 |---|---|---|
-| MYSQL | 本地 `mysql.exe` | ~165 ms |
-| POSTGRESQL | 本地 `docker exec psql` | ~1 s |
-| SQLITE / 其它 | Java 引擎（`SqlQueryBootstrap`） | ~17 s |
+| MYSQL | 本地 `mysql.exe`，~165 ms | 走驱动，毫秒级 |
+| POSTGRESQL | `docker exec psql`，~1 s | 走驱动，毫秒级 |
+| SQLITE / 其它 | 起 Maven + JVM，**~17 s** | 走插件驱动，毫秒级 |
+| 新增类型 | **要改 Node 代码** | **零改动** |
 
-> 引擎慢的根因是 `Node -> mvn.cmd -> JVM` 每次都要起一个 Maven。
-> **彻底解决要改成常驻 Java 服务**（起一次 JVM，之后 HTTP 毫秒级）。
-> 本次的取舍是"复用现有链路，接受启动开销"。
+实测：4 个数据源的行数探测，从 **17.2 秒** 降到 **0.2 秒**。
 
-### 9.2 为什么 SQL 要走临时文件
+### 9.1.1 为什么"统一走驱动"才是正解
 
-调用链三层：`Node -> mvn.cmd(batch) -> java`。batch 对命令行引号解析不可靠，
-含空格的 SQL（如 `SELECT COUNT(*) AS c FROM t_order`）会被拆成多个参数，
-表现为 `The syntax of the command is incorrect`。
+关键在于：**SQLite / ClickHouse 的 JDBC 驱动只存在于插件 jar 里**，
+主工程 classpath 上根本没有。所以控制台不能自己写 JDBC 连接，
+必须复用工厂让插件机制去选驱动。
 
-解法：SQL 写到临时文件，参数只传 `@文件路径`（无空格、无特殊字符）。
-Java 侧见到 `@` 前缀就改为读文件内容，彻底绕开三层 shell 的转义问题。
+这样"控制台能力"和"插件能力"自动对齐 ——
+能同步的数据源就一定能在界面上查看，不必维护两套"认识哪些数据库"的逻辑。
 
 ### 9.3 读不到行数时不许显示 0
 
@@ -391,17 +393,26 @@ mvn -B -q -pl mini-sync-job exec:java "-Dexec.mainClass=com.minisync.job.DriverT
 # 单元测试
 mvn -B clean install -pl mini-sync-job -am -Dtest=PluginDriverRegistryTest -Dsurefire.failIfNoSpecifiedTests=false
 
-# 启动控制台
-cd D:\mini-sync\web
-node server.js
+# 启动控制台（Spring Boot 常驻服务）
+cd D:\mini-sync
+.\start.bat
+# 或手动：
+mvn -B -pl mini-sync-server spring-boot:run
+# 打开 http://localhost:8081
 ```
 
 自定义插件目录：
 
 ```powershell
-# 通过系统属性覆盖默认的 plugins/ 目录
+# 方式一：系统属性（优先级最高）
+mvn -pl mini-sync-server spring-boot:run "-Dspring-boot.run.jvmArguments=-Dminisync.plugin.dir=D:\my-drivers"
+
+# 方式二：环境变量
 $env:MINISYNC_PLUGIN_DIR = "D:\somewhere\my-drivers"
-node server.js
-# 或 Java 侧
-mvn exec:java -Dexec.args="..." -Dminisync.plugin.dir=D:\my-drivers
+.\start.bat
 ```
+
+> **服务端会自动定位插件目录**：优先用显式配置，其次找当前工作目录下的
+> `plugins/`，最后从 class 位置逐级向上找项目根。
+> 所以从 IDE 或 `mvn -pl mini-sync-server spring-boot:run`（工作目录是模块目录）
+> 启动时也能正确找到根目录的 `plugins/`，不需要手工配。

@@ -144,18 +144,33 @@ SELECT * FROM t_order WHERE id > 90000 ORDER BY id LIMIT 1000;
 启动方式：
 
 ```powershell
-cd D:\mini-sync\web
-node server.js
-# 打开 http://localhost:8090
+cd D:\mini-sync
+.\start.bat
+# 或手动： mvn -B -pl mini-sync-server spring-boot:run
+# 打开 http://localhost:8081
 ```
 
 界面功能：
 - **数据源管理**：展示全部数据源类型、连接状态与实时记录数；
   类型下拉**动态来自引擎**（`/api/drivertype/list`），新增插件后自动多出一项
-- **触发同步**：支持 MySQL↔MySQL、MySQL↔PostgreSQL、MySQL↔SQLite 任意组合
-- **执行日志**：实时输出
-- **性能对比图表**：一键跑两种分页方式并出柱状图
+- **同步任务**：支持全量/增量两种模式；增量任务显示「上次水位」并可「重置水位」
+- **触发同步**：支持 MySQL↔MySQL、MySQL↔PostgreSQL、MySQL↔SQLite 任意组合；
+  提交后立即返回，进度实时轮询刷新
+- **运行日志**：实时输出（服务端最多保留 200 行）
 - **数据预览**：可切换查看各数据源的数据
+
+### 控制台性能（阶段二改造前后）
+
+| 场景 | Node 版（阶段一） | Spring Boot 版（阶段二） |
+|---|---|---|
+| 数据源列表（4 个库行数探测） | 17.2 s | **0.2 s** |
+| 触发同步的 HTTP 返回 | 阻塞几十秒 | **9 ms**（异步，返回 runId） |
+| 单库行数探测（MySQL） | 165 ms | 毫秒级 |
+| 单库行数探测（SQLite 等插件类型） | **~17 s** | 毫秒级 |
+| 并发触发同一任务 | 无保护 | 409 拒绝 |
+
+> 根因：Node 版每次查询都要 `mvn.cmd` 起一个 Maven + JVM。
+> 改成常驻服务后 JVM 只启动一次，所有查询在同进程内完成。
 
 ---
 
@@ -222,8 +237,11 @@ cd D:\mini-sync
 & "D:\apache-maven-3.9.16\bin\mvn.cmd" -B clean install -pl mini-sync-job -am `
   "-Dtest=PluginDriverRegistryTest" "-Dsurefire.failIfNoSpecifiedTests=false"
 
-# 10. 启动可视化控制台
-cd D:\mini-sync\web
-node server.js
+# 10. 启动可视化控制台（Spring Boot 常驻服务）
+cd D:\mini-sync
+.\start.bat
+# 或手动：
+#   & "D:\apache-maven-3.9.16\bin\mvn.cmd" -B -pl mini-sync-server spring-boot:run
+# 打开 http://localhost:8081
 ```
 

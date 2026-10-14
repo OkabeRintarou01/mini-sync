@@ -15,6 +15,7 @@
         <module>mini-sync-plugin-loader</module>
         <module>mini-sync-connector</module>
         <module>mini-sync-job</module>
+        <module>mini-sync-server</module>
         <module>mini-sync-plugins/mysql-plugin</module>
         <module>mini-sync-plugins/postgresql-plugin</module>
         <!--
@@ -36,10 +37,31 @@
         <slf4j.version>2.0.13</slf4j.version>
         <logback.version>1.5.6</logback.version>
         <junit.version>5.10.2</junit.version>
+        <!-- Spring Boot 3.3.x 要求 JDK 17+，本项目用 JDK 21 -->
+        <spring-boot.version>3.3.5</spring-boot.version>
+        <mybatis-plus.version>3.5.7</mybatis-plus.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
+            <!--
+              用 import 方式引入 Spring Boot 的依赖版本表，而不是把根 pom 的
+              <parent> 改成 spring-boot-starter-parent。
+              原因：根 pom 已经是 6 个子模块的父工程，再插一层父工程会与现有的
+              dependencyManagement 和插件模块继承关系冲突。
+            -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring-boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+                <version>${mybatis-plus.version}</version>
+            </dependency>
             <dependency>
                 <groupId>org.projectlombok</groupId>
                 <artifactId>lombok</artifactId>
@@ -114,6 +136,15 @@
                     <artifactId>maven-compiler-plugin</artifactId>
                     <version>3.13.0</version>
                     <configuration>
+                        <!--
+                          保留方法参数名到字节码。
+                          Spring MVC 的 @RequestParam / @PathVariable 在没写显式名字时
+                          （如 @RequestParam Long id），靠反射读参数名来绑定。
+                          没有这个开关会抛：
+                            "Name for argument of type [java.lang.Long] not specified"
+                          这是 Spring Boot 项目的常见坑，加上即可。
+                        -->
+                        <parameters>true</parameters>
                         <annotationProcessorPaths>
                             <path>
                                 <groupId>org.projectlombok</groupId>

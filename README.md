@@ -49,18 +49,28 @@
 |---|---|---|
 | Java | 21 | 主语言 |
 | Maven | 3.9 | 包管理与多模块构建 |
+| Spring Boot | 3.3.5 | 常驻 Web 服务（控制台后端） |
+| MyBatis-Plus | 3.5.7 | 管理库持久层（数据源/任务/日志/用户） |
 | MySQL | 5.7 | 主库（源/目标/管理库） |
 | PostgreSQL | 16 | 异构数据源（Docker） |
 | SQLite | 3.45 | 第三方插件验证 |
-| JDBC | — | 数据访问（无 ORM，刻意保持轻量） |
+| JDBC | — | 同步引擎的数据访问（不经过 ORM） |
 | SLF4J + Logback | 2.0 / 1.5 | 日志 |
 | Lombok | 1.18 | 样板代码简化 |
 | JUnit 5 | 5.10 | 单元测试 |
-| Node.js | 16 | 控制台服务 |
 | Docker | — | PostgreSQL 容器 |
 
-**未使用（有意取舍）**：Spring Boot、MyBatis/JPA、Redis、xxl-job、Flink。
-这些在这个规模下只会增加复杂度，不增加可讲的技术深度。
+**分层原则（重要）**：
+
+- **管理库**（mini-sync 自己的配置表）→ 走 **MyBatis-Plus**
+- **被同步的源库/目标库** → 走 **插件驱动 + JDBC**，不经过 ORM
+
+两者职责不同：前者是单表 CRUD，后者需要在运行时按类型加载任意插件驱动。
+把外部数据源也塞进 Mapper 会破坏插件化的核心价值。
+
+**未使用（有意取舍）**：Redis、xxl-job、Flink。
+Redis 计划用于多实例场景下的任务锁与进度共享（当前单实例用内存即可）；
+后两者在这个规模下只会增加复杂度，不增加可讲的技术深度。
 
 ---
 
@@ -85,40 +95,54 @@ notepad .env
 
 # 至少填写：
 # MINISYNC_DB_PWD=<你的 MySQL 密码>
-# MINISYNC_PG_PWD=<你的 PostgreSQL 密码>
-
-# 2. 在当前 PowerShell 进程加载 .env（不回显密码）
-Get-Content D:\mini-sync\.env | ForEach-Object {
-  if ($_ -match '^\s*([^#=]+)\s*=\s*(.*)$') {
-    [Environment]::SetEnvironmentVariable($matches[1].Trim(), $matches[2].Trim(), 'Process')
-  }
-}
-
-# 3. 启动控制台；Node 也会自动读取项目根目录下的 .env
-cd D:\mini-sync\web
-node server.js
+# MINISYNC_PG_PWD=<你的 PostgreSQL 密码>   （用 PG 时才需要）
 ```
-
-Maven 启动的 Java 子进程会继承 Node/PowerShell 环境变量。单独运行 Maven 时，也要先运行上面的加载段。
 
 | 变量 | 用途 | 是否必须 |
 |---|---|---|
 | `MINISYNC_DB_PWD` | MySQL 管理库/源库密码 | **必须** |
-| `MINISYNC_DEFAULT_DS_PWD` | 控制台新建 MySQL/PG 数据源时的默认密码 | 可选；也可在表单中输入 |
 | `MINISYNC_DB_USER` | MySQL 用户名 | 否，默认 `root` |
 | `MINISYNC_PG_PWD` | PostgreSQL 密码 | 使用 PG 时必须 |
 | `MINISYNC_PG_USER` | PostgreSQL 用户名 | 否，默认 `postgres` |
 | `MINISYNC_ADMIN_HOST` / `MINISYNC_ADMIN_PORT` / `MINISYNC_ADMIN_DB` | 管理库连接 | 否，有本地默认值 |
-| `MINISYNC_PORT` | 控制台端口 | 否，默认 `8090` |
+| `MINISYNC_SERVER_PORT` | Web 服务端口 | 否，默认 `8081` |
 | `MINISYNC_MVN` / `MINISYNC_JAVA_HOME` | 本机 Maven / JDK 路径 | 否，按本机安装位置配置 |
 
 > `.env` 已在 `.gitignore` 中排除；仓库只提交无密码值的 `.env.example`。
 > `sql/admin.sql` 不再初始化含口令的数据源和同步任务，首次运行请在控制台创建。
 
+### 启动服务
+
+**方式一：一键脚本（推荐）**
+
+```powershell
+cd D:\mini-sync
+.\start.bat            # 直接启动（自动加载 .env）
+.\start.bat --build    # 先全量编译再启动
+```
+
+**方式二：手动启动**
+
+```powershell
+cd D:\mini-sync
+$env:JAVA_HOME = "D:\jdk"
+
+# 首次或改了 Java 代码后：编译（会同时把驱动打成插件 jar）
+mvn -B clean install -DskipTests
+
+# 启动 Spring Boot 常驻服务（会自动读取项目根目录的 .env）
+mvn -B -pl mini-sync-server spring-boot:run
+```
+
+启动成功后访问 **http://localhost:8081**，默认账号 `admin` / `admin123`。
+
+服务是**常驻**的：JVM 只启动一次，后续所有请求在同进程内处理，
+所以数据源行数探测、同步触发都是毫秒级响应。
+
 ### 1. 准备测试数据（首次）
 
 ```powershell
-# 先按“配置说明”创建并填写 D:\mini-sync\.env
+# 先按"配置说明"创建并填写 D:\mini-sync\.env
 
 # MySQL 建库 + 造 10 万行（-p 交互提示密码）
 Get-Content D:\mini-sync\sql\init.sql -Raw | & $env:MINISYNC_MYSQL_BIN -u$env:MINISYNC_DB_USER -p
@@ -137,13 +161,13 @@ Get-Content D:\mini-sync\sql\pg_init.sql -Raw | docker exec -e PGPASSWORD="$env:
 
 ### 2. 编译（含插件打包）
 
+编译会在打包驱动插件的同时，把 jar 拷到 `plugins/` 目录：
+
 ```powershell
-$env:JAVA_HOME = "D:\jdk"
 cd D:\mini-sync
+$env:JAVA_HOME = "D:\jdk"
 mvn -B clean install -DskipTests
 ```
-
-构建产物会自动拷到 `plugins/` 目录：
 
 ```
 plugins\
@@ -152,29 +176,46 @@ plugins\
 └── minisync-sqlite-plugin-1.0.0.jar
 ```
 
-### 3. 跑一次同步
+### 3. 启动控制台
 
 ```powershell
-# 同库同步（游标分页）
-mvn -B -q -pl mini-sync-job exec:java "-Dexec.mainClass=com.minisync.job.SyncBootstrap" "-Dexec.args=full 1000"
+cd D:\mini-sync
+.\start.bat
+# 打开 http://localhost:8081，默认账号 admin / admin123
+```
 
-# 跨库同步（MySQL -> PostgreSQL）
-mvn -B -q -pl mini-sync-job exec:java "-Dexec.mainClass=com.minisync.job.CrossDbBootstrap" "-Dexec.args=mysql2pg"
+### 4. 跑一次同步（两种方式）
 
-# 插件化验证（MySQL -> SQLite，两端驱动均来自插件 jar）
-mvn -B -pl mini-sync-job exec:java "-Dexec.mainClass=com.minisync.job.PluginSyncBootstrap"
+**方式一：网页控制台（推荐）**
+
+登录后左侧「同步任务」→ 选任务点「执行」，或到「执行同步」页选任务点「开始同步」。
+提交后立刻返回，进度实时刷新。
+
+**方式二：命令行（调试时日志最全）**
+
+```powershell
+# 先加载 .env（命令行进程不会自动读 .env）
+Get-Content D:\mini-sync\.env | ForEach-Object {
+  if ($_ -match '^\s*([^#=]+)\s*=\s*(.*)$') {
+    [Environment]::SetEnvironmentVariable($matches[1].Trim(), $matches[2].Trim(), 'Process')
+  }
+}
+$env:JAVA_HOME = "D:\jdk"
+
+# 按 jobId 跑一次同步（jobId 在控制台任务列表里看）
+mvn -B -pl mini-sync-job exec:java "-Dexec.mainClass=com.minisync.job.DynamicSyncBootstrap" "-Dexec.args=6"
 
 # 查看当前注册了哪些驱动类型
 mvn -B -q -pl mini-sync-job exec:java "-Dexec.mainClass=com.minisync.job.DriverTypeLister"
+
+# 其它验证入口
+mvn -B -q -pl mini-sync-job exec:java "-Dexec.mainClass=com.minisync.job.SyncBootstrap" "-Dexec.args=full 1000"
+mvn -B -q -pl mini-sync-job exec:java "-Dexec.mainClass=com.minisync.job.CrossDbBootstrap" "-Dexec.args=mysql2pg"
+mvn -B -pl mini-sync-job exec:java "-Dexec.mainClass=com.minisync.job.PluginSyncBootstrap"
 ```
 
-### 4. 启动控制台
-
-```powershell
-cd D:\mini-sync\web
-node server.js
-# 打开 http://localhost:8090，默认账号 admin / admin123
-```
+> 命令行与网页走的是**同一份同步逻辑**（`SyncExecutionService`），
+> 区别只在触发方式与水位落库的实现（JDBC vs MyBatis-Plus）。
 
 控制台五个功能区：
 
@@ -195,7 +236,7 @@ node server.js
 ```
 mini-sync/
 ├── mini-sync-spi\                插件契约（零依赖，只含接口）
-│   ├── DataSourceDriver               驱动接口：6 个方法
+│   ├── DataSourceDriver               驱动接口：7 个方法
 │   ├── DataSourceConfig               连接配置
 │   └── DataSourceDriverProvider       插件注册契约
 │
@@ -207,12 +248,31 @@ mini-sync/
 │   ├── factory\DataSourceDriverFactory    插件优先，classpath 兜底
 │   └── pool\DataSourcePool               按数据源 ID 缓存连接
 │
-├── mini-sync-job\                执行器与入口
-│   ├── executor\SyncJobExecutor          同步核心（面试密集区）
-│   ├── DynamicSyncBootstrap              从管理库读配置执行
+├── mini-sync-job\                同步引擎（纯 Java，无框架依赖）
+│   ├── service\SyncExecutionService      ★ 全量/增量执行 + 水位落库策略
+│   ├── executor\SyncJobExecutor          同步核心（游标分页 / 复合游标）
+│   ├── DynamicSyncBootstrap              命令行入口（按 jobId 执行）
 │   ├── PluginSyncBootstrap               插件化验证入口
 │   ├── DriverTypeLister                  列出已注册驱动类型
-│   └── SqlQueryBootstrap                 控制台取数入口
+│   └── SqlQueryBootstrap                 通用取数入口
+│
+├── mini-sync-server\             ★ 常驻 Web 服务（Spring Boot）
+│   ├── controller\                       15 个 REST 接口
+│   │   ├── AuthController                    登录/登出
+│   │   ├── DatasourceController              数据源 CRUD
+│   │   ├── JobController                     任务 CRUD + 重置水位
+│   │   ├── RunController                     触发同步/进度/历史/预览
+│   │   ├── DriverTypeController              驱动类型列表
+│   │   └── HealthController                  健康检查
+│   ├── service\
+│   │   ├── SyncTaskService                   异步执行编排
+│   │   ├── SyncRunStateService               运行状态与进度（内存）
+│   │   ├── DatasourceProbeService            按配置连任意库执行 SQL
+│   │   ├── DriverRegistryService             暴露插件注册表
+│   │   └── AuthService                       登录认证（演示级）
+│   ├── mapper\                           4 个 MyBatis-Plus Mapper
+│   ├── entity\                           4 个实体
+│   └── resources\static\                 前端页面（登录 + 控制台）
 │
 ├── mini-sync-plugins\            驱动插件（各自自包含）
 │   ├── mysql-plugin\
@@ -221,7 +281,7 @@ mini-sync/
 │
 ├── plugins\                      打包产物落点（运行时扫描）
 ├── sql\                          建库脚本与测试数据
-└── web\                          可视化控制台（Node + 单页 HTML）
+└── start.bat                     一键启动脚本
 ```
 
 ### 为什么这样分层
@@ -258,13 +318,52 @@ SyncJobExecutor          ← 只依赖接口，不知道对面是 MySQL 还是 S
 如果工厂返回共享单例，当源库与目标库恰好同为 MySQL 时，两端会拿到同一个实例、
 共用同一条连接，数据写到自己身上。**这是本项目早期真实踩过的坑。**
 
+### 一次同步请求的完整链路
+
+```
+浏览器
+  │  GET /api/run?jobId=6
+  ▼
+RunController                        ① 校验任务、检查并发锁
+  │  runStateService.tryLockJob()
+  │  syncTaskService.executeAsync()  ② 提交到后台线程池 → 立即返回 runId
+  ▼（HTTP 请求在此结束，约 10ms）
+─────────────────────────────────────────────────────────────
+后台线程 sync-<n>
+  │  jobMapper / dsMapper            ③ 从管理库读任务与数据源（MyBatis-Plus）
+  ▼
+SyncExecutionService                ④ 与命令行入口【共用】的同步逻辑
+  │  DataSourceDriverFactory.create()  按 ds_type 从 plugins/ 选驱动
+  ▼
+SyncJobExecutor                     ⑤ 全量：主键游标分页
+  │                                     增量：复合游标 (水位, 主键)
+  │  每批成功 → 回调落水位            ⑥ 进程被杀也能续传
+  ▼
+源库 ──读取──► 内存批次 ──upsert──► 目标库
+  │
+  ▼
+写 sync_log + 更新内存运行状态
+─────────────────────────────────────────────────────────────
+浏览器
+  ▲  GET /api/run/status?runId=...   ⑦ 每 700ms 轮询一次进度与日志
+```
+
+**三个关键设计点**：
+
+1. **触发与执行分离**：HTTP 请求只负责"提交 + 返回 runId"，真正的同步在后台线程池跑。
+   否则 10 万条的同步会让请求挂几十秒，网关还可能超时掐断。
+2. **同步逻辑单一实现**：命令行入口和 Web 服务都调用 `SyncExecutionService`，
+   只是水位落库的实现不同（JDBC vs MyBatis-Plus），避免"两条路径结果不一样"。
+3. **同任务并发保护**：`tryLockJob` 用 `putIfAbsent` 保证原子性，
+   重复点击返回 409，而不是把同一份数据搬两遍。
+
 ---
 
 ## 使用姿势
 
 ### 1. 登录系统
 
-打开 http://localhost:8090，默认账号 `admin` / 密码 `admin123`。
+打开 http://localhost:8081，默认账号 `admin` / 密码 `admin123`。
 
 > 演示级会话：token 存于服务内存，进程重启即失效。
 > 账号口令从 `sys_user` 表读取（`sql/admin.sql` 初始化），
@@ -437,12 +536,21 @@ plugins/ 目录下所有 *.jar
 
 | 限制 | 说明 | 生产方案 |
 |---|---|---|
+| 运行状态存内存 | 同步进度与日志存在 `SyncRunStateService` 的 `ConcurrentHashMap` 里：**服务重启后进度会丢**，多实例部署时读不到彼此的状态 | 换成 Redis（这一步已在计划中，届时只替换该类实现，Controller 与前端不用改） |
 | 新增插件需重启进程 | 未做热加载。JDK 9+ 起 `URLClassLoader` 不再是 `ClassLoader` 的公开子类型，且 classloader 卸载要求"类、实例、加载器三者均不可达"，中途卸载易造成连接泄漏 | 常驻配置中心 + 监听变更 |
-| 控制台取数对插件类型较慢 | ~17 s。根因是 `Node → mvn.cmd → JVM` 每次查询都要起一个 Maven，不是 SQLite 本身慢 | 引擎改为常驻 Java 服务，Node 走 HTTP 反代（毫秒级） |
-| 全量同步无断点续传 | 全量从头跑到尾，进程被杀要重来（增量已有水位记录） | 按主键范围分段持久化位点 |
+| 全量同步无断点续传 | 全量从头跑到尾，进程被杀要重来（增量已有逐批水位） | 按主键范围分段持久化位点 |
 | 同步条数为乐观计数 | `total += batch.size()`，未校验目标端实际写入行数 | 累加 `executeBatch()` 返回值，或比对写入前后行数差 |
 | 密码明文存储 | `sys_user.password` 明文比对；`datasource_config.password` 明文存插件连接口令 | BCrypt 存用户口令；数据源口令加密 + 密钥管理 |
-| 登录为演示级 | token 存服务内存，无过期机制 | JWT + Redis |
+| 登录为演示级 | token 存服务内存，无过期机制；接口本身<b>未做鉴权拦截</b>（前端靠 localStorage 判断） | JWT + 拦截器统一校验 |
+| 管理库连接未池化 | 每次同步新建 `DataSourcePool`，执行完关闭 | 复用 HikariCP 连接池 |
+
+### 已解决的性能问题（阶段二）
+
+| 项目 | 之前 | 现在 |
+|---|---|---|
+| 数据源列表（含 4 个库行数探测） | 17.2 s | **0.2 s** |
+| 触发同步的 HTTP 返回 | 阻塞几十秒 | **9 ms**（异步） |
+| 控制台后端 | Node 外挂进程 | Spring Boot 常驻服务 |
 
 ---
 
@@ -464,18 +572,20 @@ mvn -B clean install -pl mini-sync-job -am "-Dtest=PluginDriverRegistryTest" "-D
 | [README.md](README.md) | 本文件：项目总览 |
 | [PLUGIN.md](PLUGIN.md) | 插件化机制详解、开发新驱动步骤、踩坑记录 |
 | [PERFORMANCE.md](PERFORMANCE.md) | 实测性能数据、分页原理分析、复现命令 |
+| [PHASE1-INCREMENT.md](PHASE1-INCREMENT.md) | 阶段一实施文档：增量同步闭环 |
 | `sql/init.sql` | MySQL 建库 + 10 万行测试数据 |
 | `sql/pg_init.sql` | PostgreSQL 建表 + 测试数据 |
 | `sql/admin.sql` | 管理库四张表 + 初始数据 |
+| `sql/migration_increment.sql` | 增量同步所需字段的迁移脚本 |
 | `.env.example` | 环境变量模板（含全部可配置项） |
-| `web/server.js` | 控制台接口服务 |
-| `web/login.html` | 登录页 |
-| `web/index.html` | 控制台主页面 |
+| `start.bat` | 一键启动脚本（自动加载 .env） |
+| `mini-sync-server/.../static/login.html` | 登录页 |
+| `mini-sync-server/.../static/index.html` | 控制台主页面 |
 
 ---
 
 <div align="center">
 
-**JDK 21** · **Maven 3.9** · **MySQL 5.7** · **PostgreSQL 16** · **SQLite 3.45**
+**JDK 21** · **Spring Boot 3.3** · **MyBatis-Plus 3.5** · **MySQL 5.7** · **PostgreSQL 16** · **SQLite 3.45**
 
 </div>
