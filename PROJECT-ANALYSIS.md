@@ -14,26 +14,46 @@ mini-sync 是一个**轻量级异构数据源同步工具**，核心价值在三
 
 ---
 
-## 二、模块结构一览
+## 二、技术栈
+
+| 依赖 | 版本 | 用途 |
+|---|---|---|
+| Java | 21 | 主语言 |
+| Maven | 3.9 | 多模块构建 |
+| Spring Boot | 3.3.5 | 常驻 Web 控制台服务 |
+| MyBatis-Plus | 3.5.7 | 管理库持久层 |
+| Redis | 7 | 任务锁 / 运行进度 / 登录会话 |
+| MySQL | 5.7 | 主库（源 / 目标 / 管理库） |
+| PostgreSQL | 16 | 异构数据源（Docker） |
+| SQLite | 3.45 | 第三方插件验证 |
+| JDBC | — | 同步引擎数据访问（不经过 ORM） |
+| SLF4J + Logback | — | 日志 |
+| Lombok | 1.18 | 样板代码简化 |
+| JUnit 5 | 5.10 | 单元测试 |
+| Docker | — | PostgreSQL / Redis 容器 |
+
+---
+
+## 三、模块结构
 
 | 模块 | 职责 | 关键类 |
 |---|---|---|
 | `mini-sync-spi` | 插件契约（零依赖） | `DataSourceDriver`、`DataSourceDriverProvider` |
 | `mini-sync-plugin-loader` | 扫目录 + 独立 ClassLoader + SPI 注册 | `PluginDriverRegistry` |
 | `mini-sync-connector` | 驱动工厂与连接缓存 | `DataSourceDriverFactory`、`DataSourcePool` |
-| `mini-sync-job` | 同步引擎（纯 Java 无框架） | `SyncExecutionService` ★、`SyncJobExecutor` |
+| `mini-sync-job` | 同步引擎（纯 Java 无框架） | `SyncExecutionService`、`SyncJobExecutor` |
 | `mini-sync-server` | Spring Boot 常驻 Web 控制台 | 15 个 REST 接口、Store 抽象层 |
 | `mini-sync-plugins/*` | MySQL / PostgreSQL / SQLite 驱动 | 各自自包含，SQLite 不在主 reactor |
 
-### 分层判断标准（面试可讲）
+### 设计要点
 
-- 新增一种数据源 = 实现 1 个 driver + 1 个 provider + 1 行 SPI 声明
-- 工厂（类型维度、不缓存）与连接池（数据源实例维度、按 ID 缓存）职责分离，避免 MySQL→MySQL 场景共用同一条连接的经典坑
+- 新增一种数据源 = 实现 1 个 driver + 1 个 provider + 1 行 SPI 声明，主工程零改动
+- 工厂（类型维度、不缓存）与连接池（数据源实例维度、按 ID 缓存）职责分离，避免 MySQL→MySQL 场景两端共用同一条连接
 - 运行状态抽象 `RunStateStore` / `SessionStore`，各有内存与 Redis 两套实现，可配置切换
 
 ---
 
-## 三、三条存储边界
+## 四、三条存储边界
 
 | 数据 | 存哪 | 理由 |
 |---|---|---|
@@ -45,7 +65,7 @@ Redis Key 设计：锁 30 分钟 TTL、运行状态/日志 24h、会话 8h；释
 
 ---
 
-## 四、实测性能
+## 五、实测性能
 
 | 指标 | 数据 |
 |---|---|
@@ -58,38 +78,30 @@ Redis Key 设计：锁 30 分钟 TTL、运行状态/日志 24h、会话 8h；释
 
 ---
 
-## 五、Git 现状审计（本次分析时点）
+## 六、Git 现状
 
 ### 已提交、远端同步正常
 
-`main` 分支与 `origin/main` 一致，最近提交链完整覆盖阶段一/阶段二过程记录、增量同步闭环、Spring Boot 化、Redis 引入。
+`main` 分支与 `origin/main` 一致，提交链完整记录了功能演进：增量同步闭环 → Spring Boot 化 → Redis 引入跨实例状态。
 
-### 未提交改动 ⚠️（本次分析发现的安全问题）
+### 本地改动（未提交）
 
-| 文件 | 改动内容 | 风险 |
-|---|---|---|
-| `DynamicSyncBootstrap.java` | `requiredEnv("MINISYNC_DB_PWD")` 改为 `env(..., "s123456")`，删除了 requiredEnv | **真实口令写死进源码**，提交即永久进 Git 历史 |
-| `start.bat` | 移除 .env 加载逻辑，说明口令改由 `application.properties` 直填 | 同上（`application.properties` 若也含明文口令则已随仓库提交） |
+`DynamicSyncBootstrap.java` 与 `start.bat` 有本地调试用改动（数据库口令改由本地配置直填）。口令属于敏感信息，这两处**保持本地不提交**。
 
-**建议处理方式**（二选一）：
+### 被合理忽略的内容
 
-1. **恢复安全写法**（推荐）：环境变量缺失时报错，本地开发用系统环境变量或 `.env` 注入，而不是改代码兜底
-2. **仅本地保留**：如果这两处改动只是本机调试便利，则长期不提交；上 Git 前用 `git checkout -- <file>` 还原
-
-### 被正确忽略、不应上传的内容（确认无误）
-
-`.env`（真实凭据）、`.idea/`、`target/`、`plugins/*.jar`（可由 `mvn package` 重建）、`data/`（SQLite 演示数据）。`.gitignore` 规则完整，没有需要补交的遗漏文件。
+`.env`（真实凭据）、`.idea/`、`target/`、`plugins/*.jar`（可由 `mvn package` 重建）、`data/`（SQLite 演示数据）。`.gitignore` 规则完整，没有遗漏需要补交的文件。
 
 ---
 
-## 六、已知限制与改进路线
+## 七、已知限制与改进方向
 
 | 限制 | 改进方向 |
 |---|---|
 | 插件不支持热加载 | 常驻配置中心 + 监听变更 |
 | 全量同步无断点续传 | 按主键范围分段持久化位点 |
 | 同步条数为乐观计数 | 累加 `executeBatch()` 返回值 |
-| 用户口令明文比对 | BCrypt + JWT + 拦截器鉴权 |
+| 用户口令明文比对 | BCrypt 哈希存储 + JWT + 拦截器鉴权 |
 | 数据源口令明文存储 | 加密存储 + 密钥管理 |
 | 管理库连接未池化 | 引入 HikariCP |
 | 无失败重试 | 重试工具类 + `sync_error_log` 表 |
@@ -97,7 +109,7 @@ Redis Key 设计：锁 30 分钟 TTL、运行状态/日志 24h、会话 8h；释
 
 ---
 
-## 七、文档体系
+## 八、文档体系
 
 | 文档 | 定位 |
 |---|---|
@@ -105,4 +117,4 @@ Redis Key 设计：锁 30 分钟 TTL、运行状态/日志 24h、会话 8h；释
 | PLUGIN.md | 插件化机制详解与踩坑 |
 | PERFORMANCE.md | 性能实测与原理 |
 | PHASE1-INCREMENT.md / PHASE1-开发过程记录.md / PHASE2-开发过程记录.md | 分阶段实施与调试过程 |
-| PROJECT-ANALYSIS.md | 本文件：仓库现状与安全审计 |
+| PROJECT-ANALYSIS.md | 本文件：项目现状分析 |
